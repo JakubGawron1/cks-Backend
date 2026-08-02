@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
-# UWAGA: wyłącznie pod hosting produkcyjny (Render Free).
+# Hosting produkcyjny: Hugging Face Space (koliber/cks-slavia) lub Render.
 # Lokalny development: cargo run (bez Dockera).
 
 FROM rust:1-bookworm AS builder
 WORKDIR /app
 
-# Render Free: mniej równoległych jobów = mniejsze ryzyko OOM przy buildzie Rusta
+# Oszczędność RAM przy buildzie (HF / Render Free)
 ENV CARGO_BUILD_JOBS=2
 ENV CARGO_TERM_COLOR=never
 

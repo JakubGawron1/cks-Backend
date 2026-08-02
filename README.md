@@ -1,16 +1,28 @@
+---
+title: Slavia Backend
+emoji: 🏋️
+colorFrom: green
+colorTo: green
+sdk: docker
+app_port: 8080
+pinned: false
+license: mit
+---
+
 # CKS Slavia — Backend (Axum)
 
 API: logowanie JWT, role łączone (`zawodnik` | `trener` | `admin` | `superadmin`).
+
+Publiczny URL Space: [https://koliber-cks-slavia.hf.space](https://koliber-cks-slavia.hf.space)
 
 ## Zasada: Dev vs hosting
 
 | Środowisko | Jak uruchamiać |
 |------------|----------------|
 | **Dev (lokalnie)** | wyłącznie `cargo run` |
-| **Hosting** | Docker (`Dockerfile` + `render.yaml`) na **Render Free** |
+| **Hosting** | Docker — **Hugging Face Space** (`koliber/cks-slavia`) lub Render |
 
-**Nie używaj Dockera do codziennego developmentu.**  
-**Nie hostujemy na Hugging Face Docker Spaces** — utworzenie wymaga płatnego HF PRO. Instrukcja: [deploy.md](./deploy.md).
+**Nie używaj Dockera do codziennego developmentu.**
 
 ## Dev — lokalnie
 
@@ -19,70 +31,77 @@ cp .env.example .env
 cargo run
 ```
 
-API: `http://127.0.0.1:8080`
+API: `http://127.0.0.1:8080`  
+Frontend lokalnie: `NEXT_PUBLIC_API_URL=http://127.0.0.1:8080`
 
-Lokalnie: baza plikowa **redb** (`./data/slavia.redb`). Frontend: `NEXT_PUBLIC_API_URL=http://127.0.0.1:8080`.
+## Deploy — Hugging Face Space
 
-## Deploy (Render Free)
+Space: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)
 
-Szybki start:
+### Secrets (Settings → Variables and secrets)
 
-1. Push repo na GitHub
-2. Render → **New** → **Blueprint** → wybierz to repo (`render.yaml`)
-3. Ustaw `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_EMAIL`, `SEED_SUPERADMIN_PASSWORD`
-4. `curl https://TWOJ-SERWIS.onrender.com/api/health`
+| Klucz | Wymagane | Opis |
+|-------|----------|------|
+| `JWT_SECRET` | tak | Min. 16 znaków (lepiej 32+) |
+| `FRONTEND_ORIGIN` | tak* | `https://slavia.vercel.app` (+ opcjonalnie localhost) |
+| `SEED_SUPERADMIN_PASSWORD` | tak | Silne hasło (nie `superadmin123!`) |
+| `SEED_SUPERADMIN_EMAIL` | nie | Domyślnie `superadmin@cks-slavia.local` |
+| `JWT_EXPIRY_HOURS` | nie | Domyślnie `72` |
+
+\* Alias: `CORS_ALLOWED_ORIGINS` (stara nazwa z poprzedniego Space).
+
+Przykład:
+
+```text
+FRONTEND_ORIGIN=https://slavia.vercel.app,http://localhost:3000
+```
+
+### Frontend (Vercel)
+
+```env
+NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
+```
+
+Po zmianie — **Redeploy** frontendu.
+
+### Push na Space (zastąpienie starego kodu)
+
+```bash
+git remote add hf https://huggingface.co/spaces/koliber/cks-slavia
+# lub: git remote set-url hf ...
+git push hf main --force
+```
+
+Wymaga zalogowania: `hf auth login` (token z write do Spaces).
+
+Healthcheck:
+
+```bash
+curl https://koliber-cks-slavia.hf.space/api/health
+```
 
 Pełna instrukcja: [deploy.md](./deploy.md).
 
-## Produkcja / Turso
+## Uwaga: baza na Space
 
-```env
-DATABASE_URL=libsql://YOUR-DB.turso.io
-TURSO_AUTH_TOKEN=...
-```
-
-Docelowo warstwa `Database` przełączy się na klienta libsql. Schema SQL poniżej.
-
-### Docelowy schemat SQL (Turso / SQLite)
-
-```sql
-CREATE TABLE users (
-  id TEXT PRIMARY KEY NOT NULL,
-  email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-  password_hash TEXT NOT NULL,
-  display_name TEXT NOT NULL,
-  roles TEXT NOT NULL,          -- JSON: ["zawodnik","trener"]
-  is_active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-```
+`DATABASE_URL=file:/app/data/slavia.redb` — dysk Space jest **efemeryczny**. Po restarcie/rebuild dane mogą zniknąć (seed od nowa).
 
 ## Endpointy
 
 | Metoda | Ścieżka | Auth | Opis |
 |--------|---------|------|------|
+| GET | `/` | — | Strona index (link do frontendu) |
 | GET | `/api/health` | — | Healthcheck |
 | POST | `/api/auth/login` | — | `{ email, password }` → JWT + user |
 | GET | `/api/auth/me` | Bearer | Profil zalogowanego |
 
 ## Konto seed (tylko superadmin)
 
-Przy pustej bazie tworzone jest **wyłącznie** konto z najwyższymi uprawnieniami:
+Przy pustej bazie tworzone jest **wyłącznie** konto z najwyższymi uprawnieniami (email/hasło z env).
 
-| E-mail | Hasło | Role |
-|--------|-------|------|
-| `superadmin@cks-slavia.local` | `superadmin123!` | `superadmin` |
-
-Pozostałe role (`admin`, `trener`, `zawodnik`) nadaje później superadmin.
-
-## Docker — tylko hosting (Render)
-
-Obraz pod deploy kontenera na Render. **Nie** pod lokalny workflow i **nie** pod HF Docker Spaces.
+## Docker — tylko hosting
 
 ```bash
-# budowanie pod deploy — nie do codziennego dev
+# nie do codziennego dev
 docker build -t slavia-backend .
 ```
-
-Pliki: `Dockerfile`, `.dockerignore`, `render.yaml`. Instrukcja: [deploy.md](./deploy.md).

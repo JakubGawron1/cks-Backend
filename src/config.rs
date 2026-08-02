@@ -26,13 +26,45 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// Render ustawia `RENDER=true` na każdej usłudze.
+    /// Render ustawia `RENDER=true`.
     pub fn is_render() -> bool {
         std::env::var("RENDER").is_ok()
     }
 
+    /// Hugging Face Spaces ustawia `SPACE_ID` (np. `koliber/cks-slavia`).
+    pub fn is_huggingface() -> bool {
+        std::env::var("SPACE_ID").is_ok()
+    }
+
+    /// Hosting produkcyjny (Render lub HF Space) — wymagane sekrety.
+    pub fn is_hosted() -> bool {
+        Self::is_render() || Self::is_huggingface()
+    }
+
+    fn frontend_origins_from_env(hosted: bool) -> Result<Vec<String>, ConfigError> {
+        let raw = std::env::var("FRONTEND_ORIGIN")
+            .or_else(|_| std::env::var("CORS_ALLOWED_ORIGINS"));
+
+        let raw = if hosted {
+            raw.map_err(|_| ConfigError::Missing("FRONTEND_ORIGIN"))?
+        } else {
+            raw.unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string())
+        };
+
+        let origins = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+
+        if origins.is_empty() {
+            return Err(ConfigError::Invalid("FRONTEND_ORIGIN".into()));
+        }
+        Ok(origins)
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
-        let on_render = Self::is_render();
+        let hosted = Self::is_hosted();
 
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "file:./data/slavia.redb".to_string());
@@ -45,7 +77,7 @@ impl Config {
             return Err(ConfigError::Missing("TURSO_AUTH_TOKEN"));
         }
 
-        let jwt_secret = if on_render {
+        let jwt_secret = if hosted {
             std::env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?
         } else {
             std::env::var("JWT_SECRET").unwrap_or_else(|_| {
@@ -74,30 +106,12 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
 
-        let frontend_origins = if on_render {
-            let raw = std::env::var("FRONTEND_ORIGIN")
-                .map_err(|_| ConfigError::Missing("FRONTEND_ORIGIN"))?;
-            raw.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        } else {
-            std::env::var("FRONTEND_ORIGIN")
-                .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string())
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-        };
-
-        if frontend_origins.is_empty() {
-            return Err(ConfigError::Invalid("FRONTEND_ORIGIN".into()));
-        }
+        let frontend_origins = Self::frontend_origins_from_env(hosted)?;
 
         let seed_superadmin_email = std::env::var("SEED_SUPERADMIN_EMAIL")
             .or_else(|_| std::env::var("SEED_ADMIN_EMAIL"))
             .unwrap_or_else(|_| "superadmin@cks-slavia.local".to_string());
-        let seed_superadmin_password = if on_render {
+        let seed_superadmin_password = if hosted {
             std::env::var("SEED_SUPERADMIN_PASSWORD")
                 .or_else(|_| std::env::var("SEED_ADMIN_PASSWORD"))
                 .map_err(|_| ConfigError::Missing("SEED_SUPERADMIN_PASSWORD"))?
@@ -107,7 +121,7 @@ impl Config {
                 .unwrap_or_else(|_| "superadmin123!".to_string())
         };
 
-        if on_render && seed_superadmin_password == "superadmin123!" {
+        if hosted && seed_superadmin_password == "superadmin123!" {
             return Err(ConfigError::Invalid(
                 "SEED_SUPERADMIN_PASSWORD: ustaw własne hasło (nie domyślne)".into(),
             ));

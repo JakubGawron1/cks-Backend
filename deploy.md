@@ -1,140 +1,123 @@
-# Deploy na Render Free (Docker)
+# Deploy backendu (Docker)
 
 ## Zasada
 
 | Środowisko | Jak |
 |------------|-----|
 | **Dev** | wyłącznie `cargo run` |
-| **Hosting** | Docker na **Render Free** (`Dockerfile` + `render.yaml`) |
+| **Hosting** | Docker — **Hugging Face Space** lub Render Free |
 
-**Nie** używamy Hugging Face Docker Spaces (paywall PRO).
+Aktualny produkcyjny target: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)  
+URL API: `https://koliber-cks-slavia.hf.space`
 
 ---
 
-## Co jest gotowe w repo
+## A) Hugging Face Space (główny)
+
+### Co jest gotowe
 
 | Plik | Rola |
 |------|------|
-| `Dockerfile` | multi-stage, `CARGO_BUILD_JOBS=2`, non-root, `PORT`/`HOST` |
-| `.dockerignore` | mniejszy kontekst builda |
-| `render.yaml` | Blueprint: Free, Frankfurt, healthcheck `/api/health` |
-| `GET /api/health` | healthcheck Rendera |
+| `Dockerfile` | multi-stage, `CARGO_BUILD_JOBS=2`, port **8080** (`app_port`) |
+| `README.md` | YAML frontmatter HF (`sdk: docker`) |
+| `GET /api/health` | healthcheck |
+| `GET /` | strona index → link do Vercel |
 
-Backend czyta `PORT` (Render wstrzykuje). Na Renderze (`RENDER=true`) wymagane są: `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD` (nie domyślne).
+Na Space (`SPACE_ID` ustawione) wymagane: `JWT_SECRET`, `FRONTEND_ORIGIN` (lub `CORS_ALLOWED_ORIGINS`), `SEED_SUPERADMIN_PASSWORD` (nie domyślne).
 
----
+### 1. Secrets w Space
 
-## 1. Repo na GitHubie
-
-Push `slavia-backend` (osobne repo). **Nie** commituj `.env`, `data/`, `target/`.
-
----
-
-## 2. Deploy — Blueprint (zalecane)
-
-1. [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**
-2. Podłącz repo `slavia-backend`
-3. Render wczyta `render.yaml`
-4. Uzupełnij zmienne z `sync: false`:
+[Settings → Variables and secrets](https://huggingface.co/spaces/koliber/cks-slavia/settings):
 
 | Zmienna | Przykład |
 |---------|----------|
-| `FRONTEND_ORIGIN` | `https://twoja-apka.vercel.app` (można listę po przecinku + `http://localhost:3000`) |
-| `SEED_SUPERADMIN_EMAIL` | Twój email admina |
-| `SEED_SUPERADMIN_PASSWORD` | silne hasło (nie `superadmin123!`) |
+| `JWT_SECRET` | `openssl rand -hex 32` |
+| `FRONTEND_ORIGIN` | `https://slavia.vercel.app,http://localhost:3000` |
+| `SEED_SUPERADMIN_EMAIL` | Twój email |
+| `SEED_SUPERADMIN_PASSWORD` | silne hasło |
 
-`JWT_SECRET` generuje Render automatycznie (`generateValue`).
+Usuń / zignoruj stare klucze starego monorepo (`TURSO_*`, `GROQ_*`, itd.), jeśli nie są używane.
 
-5. Deploy — pierwszy build Rust: kilka–kilkanaście minut.
-
-Publiczny URL: `https://slavia-backend.onrender.com` (lub podobny).
+### 2. Zastąpienie starego kodu (force push)
 
 ```bash
-curl https://TWOJ-SERWIS.onrender.com/api/health
+cd slavia-backend
+hf auth login   # token z uprawnieniem write do Spaces
+git remote add hf https://huggingface.co/spaces/koliber/cks-slavia
+# jeśli remote już jest:
+# git remote set-url hf https://huggingface.co/spaces/koliber/cks-slavia
+git push hf main --force
 ```
 
----
+HF zbuduje obraz z `Dockerfile` (pierwszy build Rust: długo).  
+Status: [Space](https://huggingface.co/spaces/koliber/cks-slavia) → Building → Running.
 
-## 3. Deploy — ręcznie (bez Blueprint)
+### 3. Weryfikacja
 
-1. **New** → **Web Service** → podłącz repo  
-2. **Runtime** → **Docker**  
-3. **Instance type** → **Free**  
-4. **Health Check Path** → `/api/health`  
-5. Region: Frankfurt (lub bliżej użytkowników)  
-6. Environment — jak w tabeli powyżej + opcjonalnie:
-
-```text
-DATABASE_URL=file:/app/data/slavia.redb
-JWT_EXPIRY_HOURS=72
-RUST_LOG=slavia_backend=info,tower_http=info,axum=info
+```bash
+curl https://koliber-cks-slavia.hf.space/api/health
+curl https://koliber-cks-slavia.hf.space/
 ```
 
----
-
-## 4. Frontend (Vercel)
+### 4. Frontend (Vercel)
 
 ```env
-NEXT_PUBLIC_API_URL=https://TWOJ-SERWIS.onrender.com
+NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
 ```
 
-Na backendzie `FRONTEND_ORIGIN` = dokładny origin Vercel (scheme + host, bez `/` na końcu).
+**Redeploy** frontendu po zmianie `NEXT_PUBLIC_*`.
+
+### Baza na Space
+
+Dysk efemeryczny — `file:/app/data/slavia.redb` może znikać po restarcie. Seed utworzy superadmina od nowa.
 
 ---
 
-## 5. Baza na Free
+## B) Render Free (alternatywa)
 
-`DATABASE_URL=file:/app/data/slavia.redb` — dysk **efemeryczny**: po redeploy / długim śnie dane mogą zniknąć (seed utworzy się ponownie).
+Szczegóły poniżej — ten sam `Dockerfile`, `render.yaml`.
 
-Na dłużej: Turso (gdy warstwa `Database` wspiera libsql):
+Backend czyta `PORT`. Na Renderze (`RENDER=true`) te same wymagane sekrety co na HF.
 
-```env
-DATABASE_URL=libsql://YOUR-DB.turso.io
-TURSO_AUTH_TOKEN=...
-```
+### Blueprint
 
----
+1. [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**
+2. Podłącz repo → `render.yaml`
+3. Ustaw `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_*`
 
-## 6. Limity Free — czego się spodziewać
+### Ręcznie
 
-| Temat | Zachowanie |
-|-------|------------|
-| Cold start | Sleep po ~15 min bez ruchu; pierwszy request ~30–60 s |
-| RAM runtime | 512 MB — binarka Axum wystarczy |
-| Build | Czasem wolny / OOM; Dockerfile ma `CARGO_BUILD_JOBS=2` i cache deps — spróbuj ponownie |
-| HTTPS | Wbudowane |
+**New** → **Web Service** → Docker → Free → Health Check `/api/health`
 
 ---
 
-## 7. Checklist
+## Checklist (HF)
 
-- [ ] Repo na GitHubie, `.env` poza gitem
-- [ ] Blueprint / Web Service Free + Docker
-- [ ] `FRONTEND_ORIGIN` = URL Vercel
-- [ ] `SEED_SUPERADMIN_PASSWORD` zmienione
-- [ ] `curl …/api/health` → `{"status":"ok",…}`
-- [ ] Login seed działa
-- [ ] Vercel: `NEXT_PUBLIC_API_URL` = URL Render
+- [ ] Secrets: `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD`
+- [ ] Force push obecnego `main` na Space
+- [ ] `curl …/api/health` → ok
+- [ ] Vercel: `NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space` + redeploy
+- [ ] Login z frontendu działa (CORS = origin Vercel)
 
 ---
 
-## 8. Typowe problemy
+## Typowe problemy
 
 | Objaw | Co zrobić |
 |-------|-----------|
-| Build OOM / timeout | Redeploy; cache warstw deps powinno pomóc przy kolejnych |
-| Crash przy starcie: brak `JWT_SECRET` / `FRONTEND_ORIGIN` | Ustaw env w dashboardzie |
-| CORS | Dokładny origin w `FRONTEND_ORIGIN` |
-| Utrata danych | Efemeryczny dysk Free — seed od nowa / Turso później |
-| Cold start | Normalne na Free |
+| Crash przy starcie: brak env | Ustaw secrets w Space Settings |
+| Build OOM / timeout | Redeploy; `CARGO_BUILD_JOBS=2` już w Dockerfile |
+| CORS / Failed to fetch | `FRONTEND_ORIGIN=https://slavia.vercel.app` + poprawne `NEXT_PUBLIC_API_URL` |
+| Stary kod na Space | `git push hf main --force` z tego repo |
+| Utrata danych | Efemeryczny dysk — oczekiwane przy redb |
 
 ---
 
-## Skrót
+## Skrót HF
 
 ```text
-1. Push repo → Render Blueprint (render.yaml) lub Web Service Docker Free
-2. Env: FRONTEND_ORIGIN, SEED_SUPERADMIN_PASSWORD (+ JWT_SECRET auto)
-3. curl …/api/health
-4. Vercel: NEXT_PUBLIC_API_URL=https://….onrender.com
+1. Secrets w Space (JWT, FRONTEND_ORIGIN, SEED password)
+2. hf auth login && git push hf main --force
+3. curl https://koliber-cks-slavia.hf.space/api/health
+4. Vercel: NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
 ```

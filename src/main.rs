@@ -27,11 +27,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
-    if Config::is_render() {
-        tracing::info!("Render detected — PORT={}, origins={:?}", config.port, config.frontend_origins);
+    if Config::is_hosted() {
+        let host = if Config::is_huggingface() {
+            "Hugging Face Space"
+        } else {
+            "Render"
+        };
+        tracing::info!(
+            "{host} detected — PORT={}, origins={:?}",
+            config.port,
+            config.frontend_origins
+        );
         if !config.is_remote_db() {
             tracing::warn!(
-                "Baza plikowa na Free Render jest efemeryczna (znika po redeploy/śnie). Rozważ Turso."
+                "Baza plikowa na hostingu jest efemeryczna (znika po redeploy/śnie). Rozważ Turso."
             );
         }
     }
