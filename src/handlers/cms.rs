@@ -1,14 +1,16 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 use crate::auth::extractor::{ensure_roles, AuthUser};
 use crate::error::{AppError, AppResult};
 use crate::models::club::{CmsBlock, CmsPage, CmsStatus, LogLevel};
 use crate::models::role::Role;
+use crate::models::user::{ErrorBody, OkResponse};
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CmsPageBody {
     pub slug: String,
     pub title: String,
@@ -16,6 +18,16 @@ pub struct CmsPageBody {
     pub blocks: Vec<CmsBlock>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/cms/pages",
+    responses(
+        (status = 200, description = "Lista stron CMS", body = Vec<CmsPage>),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn list_cms_pages(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -24,6 +36,18 @@ pub async fn list_cms_pages(
     Ok(Json(state.db.list_cms_pages().await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/cms/pages",
+    request_body = CmsPageBody,
+    responses(
+        (status = 200, description = "Utworzono stronę CMS", body = CmsPage),
+        (status = 400, description = "Nieprawidłowe dane wejściowe", body = ErrorBody),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn create_cms_page(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -52,6 +76,20 @@ pub async fn create_cms_page(
     Ok(Json(page))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/cms/pages/{id}",
+    params(("id" = String, Path, description = "ID strony CMS")),
+    request_body = CmsPageBody,
+    responses(
+        (status = 200, description = "Zaktualizowano stronę CMS", body = CmsPage),
+        (status = 400, description = "Nieprawidłowe dane wejściowe", body = ErrorBody),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+        (status = 404, description = "Strona CMS nie istnieje", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn update_cms_page(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -85,11 +123,22 @@ pub async fn update_cms_page(
     Ok(Json(page))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/cms/pages/{id}",
+    params(("id" = String, Path, description = "ID strony CMS")),
+    responses(
+        (status = 200, description = "Usunięto stronę CMS", body = OkResponse),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn delete_cms_page(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<OkResponse>> {
     ensure_roles(&auth, &[Role::Admin])?;
     state.db.delete_cms_page(&id).await?;
     state.db.append_log(
@@ -98,7 +147,7 @@ pub async fn delete_cms_page(
         &format!("Usunięto stronę CMS {id}"),
         Some(&auth.user.id),
     ).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(OkResponse { ok: true }))
 }
 
 fn validate_page(body: &CmsPageBody) -> AppResult<()> {

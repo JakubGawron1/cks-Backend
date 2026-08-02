@@ -115,12 +115,12 @@ Ten sam `Dockerfile`, `render.yaml`. Te same sekrety co na HF (w tym Turso).
 
 ## Checklist (HF)
 
-- [ ] GitHub secret `HF_TOKEN` (write do Spaces)
-- [ ] Space secrets: `PRODUCTION_MODE=production`, `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD`
-- [ ] `git push origin main` → zielony workflow Actions
-- [ ] `curl …/api/health` → ok
-- [ ] Vercel: `NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space` + redeploy
-- [ ] Login z frontendu działa (CORS = origin Vercel)
+- [x] GitHub secret `HF_TOKEN` (write do Spaces)
+- [x] Space secrets: `PRODUCTION_MODE=production`, `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD`
+- [x] `git push origin main` → zielony workflow Actions
+- [x] `curl …/api/health` → ok
+- [x] Vercel: `NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space` + redeploy
+- [x] Login z frontendu działa (CORS = origin Vercel)
 
 ---
 
@@ -134,6 +134,32 @@ Ten sam `Dockerfile`, `render.yaml`. Te same sekrety co na HF (w tym Turso).
 | CORS / Failed to fetch | `FRONTEND_ORIGIN=https://slavia.vercel.app` + poprawne `NEXT_PUBLIC_API_URL` |
 | Stary kod na Space | Push na `main` albo **Run workflow**; sprawdź logi Actions |
 | Błąd Turso / auth | Sprawdź `DATABASE_URL` (`libsql://`) i `TURSO_AUTH_TOKEN` |
+
+---
+
+## OpenAPI / typy frontendu
+
+Źródło prawdy: adnotacje `utoipa` w backendzie (`OpenApiRouter`).
+
+| URL na Space | Opis |
+|--------------|------|
+| `/api/openapi.json` | Surowy OpenAPI 3 |
+| `/api/docs` | **Scalar** |
+| `/api/swagger` | **Swagger UI** |
+
+### Regeneracja typów (Orval + React Query)
+
+```text
+cd slavia-backend
+cargo test export_openapi -- --ignored
+
+cd ../slavia-frontend
+pnpm gen:api
+```
+
+Commituj w parze: `slavia-frontend/openapi/openapi.json` oraz `slavia-frontend/lib/api/generated/**`.
+
+Feature flags: katalog (klucz, kind, opis, rollout_status) żyje w backendzie (`sync_flag_catalog` przy starcie). DevTools: `GET /api/admin/flags` (superadmin). Publiczne: `GET /api/flags/public` (bez auth) — steruje m.in. `/blog`, `/ogloszenia`, motywami paneli.
 
 ---
 

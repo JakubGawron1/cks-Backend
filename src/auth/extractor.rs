@@ -29,27 +29,40 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        let path = parts.uri.path();
         let auth_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::Unauthorized("Brak tokenu autoryzacji.".into()))?;
+            .ok_or_else(|| {
+                tracing::debug!(%path, "auth: brak nagłówka Authorization");
+                AppError::Unauthorized("Brak tokenu autoryzacji.".into())
+            })?;
 
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| AppError::Unauthorized("Oczekiwano nagłówka Bearer.".into()))?;
+        let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+            tracing::warn!(%path, "auth: nieprawidłowy schemat Authorization");
+            AppError::Unauthorized("Oczekiwano nagłówka Bearer.".into())
+        })?;
 
-        let claims = decode_token(token, &state.config.jwt_secret)?;
+        let claims = decode_token(token, &state.config.jwt_secret).map_err(|err| {
+            tracing::warn!(%path, error = %err, "auth: nieprawidłowy lub wygasły token");
+            err
+        })?;
         let user = state
             .db
             .find_user_by_id(&claims.sub)
             .await?
-            .ok_or_else(|| AppError::Unauthorized("Użytkownik nie istnieje.".into()))?;
+            .ok_or_else(|| {
+                tracing::warn!(%path, user_id = %claims.sub, "auth: użytkownik z tokenu nie istnieje");
+                AppError::Unauthorized("Użytkownik nie istnieje.".into())
+            })?;
 
         if !user.is_active {
+            tracing::warn!(%path, user_id = %user.id, email = %user.email, "auth: konto nieaktywne");
             return Err(AppError::Forbidden("Konto jest nieaktywne.".into()));
         }
 
+        tracing::debug!(%path, user_id = %user.id, email = %user.email, "auth: OK");
         Ok(AuthUser { user })
     }
 }
@@ -64,6 +77,13 @@ pub fn ensure_roles(user: &AuthUser, required: &[Role]) -> AppResult<()> {
     if has_any_role(user.roles(), required) {
         Ok(())
     } else {
+        tracing::warn!(
+            user_id = %user.user.id,
+            email = %user.user.email,
+            roles = ?user.roles(),
+            required = ?required,
+            "brak uprawnień"
+        );
         Err(AppError::Forbidden(
             "Brak uprawnień do tego zasobu.".into(),
         ))

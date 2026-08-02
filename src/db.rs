@@ -9,8 +9,8 @@ use crate::config::Config;
 use crate::error::{internal, AppError, AppResult};
 use crate::models::club::{
     AthleteProfile, AthleteStats, AttendanceRecord, AttendanceSession, CmsBlock, CmsPage, CmsStatus,
-    CompetitionResult, FeatureFlag, FlagKind, LogLevel, ResultStatus, SiteStats, SystemLog,
-    TrainingPlan, TrainingPlanProgress,
+    CompetitionResult, ContactMessage, FeatureFlag, FlagKind, FlagRolloutStatus, LogLevel,
+    Notification, ResultStatus, SiteStats, SystemLog, TrainingPlan, TrainingPlanProgress,
 };
 use crate::models::role::{has_role, roles_from_json, roles_to_json, Role};
 use crate::models::user::UserRecord;
@@ -25,6 +25,8 @@ pub const MANAGED_TABLES: &[&str] = &[
     "attendance",
     "training_plans",
     "plan_progress",
+    "contact_messages",
+    "notifications",
     "meta",
 ];
 
@@ -36,6 +38,10 @@ struct StoredUser {
     display_name: String,
     roles: String,
     is_active: bool,
+    #[serde(default = "crate::models::user::default_ui_theme")]
+    ui_theme: String,
+    #[serde(default)]
+    photo_url: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -43,6 +49,8 @@ struct StoredUser {
 impl From<StoredUser> for UserRecord {
     fn from(u: StoredUser) -> Self {
         let roles = roles_from_json(&u.roles).unwrap_or_default();
+        let ui_theme = crate::models::user::normalize_ui_theme(&u.ui_theme)
+            .unwrap_or_else(crate::models::user::default_ui_theme);
         Self {
             id: u.id,
             email: u.email,
@@ -50,6 +58,8 @@ impl From<StoredUser> for UserRecord {
             display_name: u.display_name,
             roles,
             is_active: u.is_active,
+            ui_theme,
+            photo_url: normalize_optional_url(u.photo_url),
             created_at: u.created_at,
             updated_at: u.updated_at,
         }
@@ -65,10 +75,19 @@ impl From<&UserRecord> for StoredUser {
             display_name: u.display_name.clone(),
             roles: roles_to_json(&u.roles),
             is_active: u.is_active,
+            ui_theme: u.ui_theme.clone(),
+            photo_url: u.photo_url.clone(),
             created_at: u.created_at.clone(),
             updated_at: u.updated_at.clone(),
         }
     }
+}
+
+fn normalize_optional_url(raw: Option<String>) -> Option<String> {
+    raw.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() { None } else { Some(t) }
+    })
 }
 
 #[derive(Clone)]
@@ -112,6 +131,7 @@ impl Database {
     }
 
     pub async fn migrate(&self) -> AppResult<()> {
+        tracing::debug!(tables = MANAGED_TABLES.len(), "CREATE TABLE IF NOT EXISTS…");
         for table in MANAGED_TABLES {
             let sql = format!(
                 "CREATE TABLE IF NOT EXISTS {table} (
@@ -121,6 +141,7 @@ impl Database {
             );
             self.conn.execute(&sql, ()).await.map_err(internal)?;
         }
+        tracing::info!(tables = MANAGED_TABLES.len(), "migracje OK");
         Ok(())
     }
 
@@ -135,6 +156,8 @@ impl Database {
                 display_name: "Superadmin".into(),
                 roles: roles_to_json(&[Role::Superadmin]),
                 is_active: true,
+                ui_theme: crate::models::user::default_ui_theme(),
+                photo_url: None,
                 created_at: now.clone(),
                 updated_at: now,
             })
@@ -150,41 +173,12 @@ impl Database {
     }
 
     async fn seed_defaults(&self) -> AppResult<()> {
-        if self.list_flags().await?.is_empty() {
-            let now = chrono::Utc::now().to_rfc3339();
-            for (key, label, kind, enabled) in [
-                ("public_blog", "Publiczny blog", FlagKind::Stable, true),
-                (
-                    "announcements_board",
-                    "Tablica ogłoszeń",
-                    FlagKind::Stable,
-                    true,
-                ),
-                (
-                    "experimental_live_scores",
-                    "Live wyniki (eksperymentalne)",
-                    FlagKind::Experimental,
-                    false,
-                ),
-                (
-                    "experimental_ai_summaries",
-                    "AI podsumowania CMS",
-                    FlagKind::Experimental,
-                    false,
-                ),
-            ] {
-                self.upsert_flag(FeatureFlag {
-                    key: key.into(),
-                    label: label.into(),
-                    enabled,
-                    kind,
-                    updated_at: now.clone(),
-                })
-                .await?;
-            }
-        }
+        // Katalog flag — backend jest źródłem prawdy dla frontendu (DevTools + public).
+        tracing::debug!("synchronizacja katalogu feature flags");
+        self.sync_flag_catalog().await?;
 
         if self.list_cms_pages().await?.is_empty() {
+            tracing::info!("seed: domyślna strona CMS");
             let now = chrono::Utc::now().to_rfc3339();
             self.upsert_cms_page(CmsPage {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -203,6 +197,7 @@ impl Database {
         }
 
         if self.list_results().await?.is_empty() {
+            tracing::info!("seed: przykładowy wynik zawodów");
             let now = chrono::Utc::now().to_rfc3339();
             self.upsert_result(CompetitionResult {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -213,6 +208,9 @@ impl Database {
                 snatch_kg: Some(110.0),
                 clean_jerk_kg: Some(140.0),
                 total_kg: Some(250.0),
+                bodyweight_kg: Some(89.0),
+                venue: Some("Katowice".into()),
+                category: Some("89 kg".into()),
                 status: ResultStatus::Pending,
                 reviewer_note: None,
                 submitted_at: now.clone(),
@@ -222,6 +220,7 @@ impl Database {
         }
 
         if self.get_attendance_session().await?.is_none() {
+            tracing::info!("seed: sesja obecności");
             let now = chrono::Utc::now().to_rfc3339();
             self.set_attendance_session(AttendanceSession {
                 token: uuid::Uuid::new_v4().to_string(),
@@ -280,16 +279,21 @@ impl Database {
     }
 
     pub async fn authenticate(&self, email: &str, password: &str) -> AppResult<UserRecord> {
-        let user = self
-            .find_user_by_email(email)
-            .await?
-            .ok_or_else(AppError::unauthorized)?;
+        let user = match self.find_user_by_email(email).await? {
+            Some(u) => u,
+            None => {
+                tracing::warn!(email = %email, "authenticate: nieznany e-mail");
+                return Err(AppError::unauthorized());
+            }
+        };
 
         if !user.is_active {
+            tracing::warn!(email = %email, user_id = %user.id, "authenticate: konto nieaktywne");
             return Err(AppError::Forbidden("Konto jest nieaktywne.".into()));
         }
 
         if !verify_password(password, &user.password_hash)? {
+            tracing::warn!(email = %email, user_id = %user.id, "authenticate: złe hasło");
             return Err(AppError::unauthorized());
         }
 
@@ -302,6 +306,7 @@ impl Database {
         password: &str,
         display_name: &str,
         roles: Vec<Role>,
+        photo_url: Option<String>,
     ) -> AppResult<UserRecord> {
         let now = chrono::Utc::now().to_rfc3339();
         let user = UserRecord {
@@ -311,6 +316,8 @@ impl Database {
             display_name: display_name.trim().to_string(),
             roles,
             is_active: true,
+            ui_theme: crate::models::user::default_ui_theme(),
+            photo_url: normalize_optional_url(photo_url),
             created_at: now.clone(),
             updated_at: now,
         };
@@ -401,11 +408,145 @@ impl Database {
         kv_get(&self.conn, "athlete_profiles", id).await
     }
 
+    pub async fn find_profile_by_user_id(
+        &self,
+        user_id: &str,
+    ) -> AppResult<Option<AthleteProfile>> {
+        if user_id.is_empty() || user_id == "manual" {
+            return Ok(None);
+        }
+        Ok(self
+            .list_profiles()
+            .await?
+            .into_iter()
+            .find(|p| p.user_id == user_id))
+    }
+
+    /// Zawodnik: zdjęcie konta = zdjęcie profilu — synchronizacja w obie strony.
+    pub async fn sync_photo_user_to_profile(
+        &self,
+        user_id: &str,
+        photo_url: &Option<String>,
+    ) -> AppResult<()> {
+        if let Some(mut profile) = self.find_profile_by_user_id(user_id).await? {
+            let next = normalize_optional_url(photo_url.clone());
+            if profile.photo_url != next {
+                profile.photo_url = next;
+                profile.updated_at = chrono::Utc::now().to_rfc3339();
+                self.upsert_profile(profile).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn sync_photo_profile_to_user(
+        &self,
+        user_id: &str,
+        photo_url: &Option<String>,
+    ) -> AppResult<()> {
+        if user_id.is_empty() || user_id == "manual" {
+            return Ok(());
+        }
+        if let Some(mut user) = self.find_user_by_id(user_id).await? {
+            let next = normalize_optional_url(photo_url.clone());
+            if user.photo_url != next {
+                user.photo_url = next;
+                self.update_user(&user).await?;
+            }
+        }
+        Ok(())
+    }
+
     // --- flags ---
+
+    /// Definicje dostępnych flag (klucz, etykieta, kind, opis, status, domyślne enabled).
+    fn flag_catalog() -> &'static [(&'static str, &'static str, FlagKind, &'static str, FlagRolloutStatus, bool)] {
+        &[
+            (
+                "public_blog",
+                "Publiczny blog",
+                FlagKind::Stable,
+                "Publiczna sekcja aktualności / blogu na witrynie (linki w nagłówku i stopce). Gdy wyłączona, trasy i linki znikają.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "announcements_board",
+                "Tablica ogłoszeń",
+                FlagKind::Stable,
+                "Tablica ogłoszeń klubowych widoczna na stronie publicznej. Flaga steruje dostępnością `/ogloszenia`.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "experimental_live_scores",
+                "Live wyniki (eksperymentalne)",
+                FlagKind::Experimental,
+                "Eksperymentalny podgląd wyników na żywo (zawody / trening). Na razie tylko rezerwacja klucza — brak UI i API live.",
+                FlagRolloutStatus::Planned,
+                false,
+            ),
+            (
+                "experimental_ai_summaries",
+                "AI podsumowania CMS",
+                FlagKind::Experimental,
+                "Automatyczne podsumowania treści CMS (szkice stron) z pomocą AI. Funkcja nie jest jeszcze zaimplementowana.",
+                FlagRolloutStatus::Planned,
+                false,
+            ),
+            (
+                "experimental_panel_themes",
+                "Eksperymentalne motywy paneli",
+                FlagKind::Experimental,
+                "Eksperymentalne motywy paneli (Kapsuła, Studio, Dok) — inny układ, zaokrąglenia i nawigacja. Domyślnie wyłączone; w ustawieniach konta pojawiają się dopiero po włączeniu.",
+                FlagRolloutStatus::Wired,
+                false,
+            ),
+        ]
+    }
+
+    /// Tworzy brakujące flagi i synchronizuje metadane z katalogu (bez zmiany `enabled`).
+    async fn sync_flag_catalog(&self) -> AppResult<()> {
+        let existing = self.list_flags().await?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for &(key, label, kind, description, status, default_enabled) in Self::flag_catalog() {
+            if let Some(mut flag) = existing.iter().find(|f| f.key == key).cloned() {
+                let meta_changed = flag.label != label
+                    || flag.kind != kind
+                    || flag.description != description
+                    || flag.rollout_status != status;
+                if meta_changed {
+                    flag.label = label.into();
+                    flag.kind = kind;
+                    flag.description = description.into();
+                    flag.rollout_status = status;
+                    self.upsert_flag(flag).await?;
+                }
+            } else {
+                self.upsert_flag(FeatureFlag {
+                    key: key.into(),
+                    label: label.into(),
+                    enabled: default_enabled,
+                    kind,
+                    description: description.into(),
+                    rollout_status: status,
+                    updated_at: now.clone(),
+                })
+                .await?;
+            }
+        }
+        Ok(())
+    }
 
     pub async fn list_flags(&self) -> AppResult<Vec<FeatureFlag>> {
         let mut flags: Vec<FeatureFlag> = kv_list(&self.conn, "feature_flags").await?;
-        flags.sort_by(|a, b| a.key.cmp(&b.key));
+        // Stable najpierw, potem Experimental; wewnątrz kategorii alfabetycznie.
+        flags.sort_by(|a, b| match (&a.kind, &b.kind) {
+            (FlagKind::Stable, FlagKind::Experimental) => std::cmp::Ordering::Less,
+            (FlagKind::Experimental, FlagKind::Stable) => std::cmp::Ordering::Greater,
+            _ => a.key.cmp(&b.key),
+        });
         Ok(flags)
     }
 
@@ -449,6 +590,130 @@ impl Database {
         kv_delete(&self.conn, "cms_pages", id).await
     }
 
+    // --- contact messages ---
+
+    pub async fn list_contact_messages(&self) -> AppResult<Vec<ContactMessage>> {
+        let mut items: Vec<ContactMessage> = kv_list(&self.conn, "contact_messages").await?;
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(items)
+    }
+
+    pub async fn get_contact_message(&self, id: &str) -> AppResult<Option<ContactMessage>> {
+        kv_get(&self.conn, "contact_messages", id).await
+    }
+
+    pub async fn upsert_contact_message(&self, message: ContactMessage) -> AppResult<()> {
+        kv_upsert(&self.conn, "contact_messages", &message.id, &message).await
+    }
+
+    pub async fn delete_contact_message(&self, id: &str) -> AppResult<()> {
+        kv_delete(&self.conn, "contact_messages", id).await
+    }
+
+    // --- notifications ---
+
+    pub async fn list_notifications_for_user(
+        &self,
+        user_id: &str,
+    ) -> AppResult<Vec<Notification>> {
+        let mut items: Vec<Notification> = kv_list(&self.conn, "notifications").await?;
+        items.retain(|n| n.user_id == user_id);
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(items)
+    }
+
+    pub async fn get_notification(&self, id: &str) -> AppResult<Option<Notification>> {
+        kv_get(&self.conn, "notifications", id).await
+    }
+
+    pub async fn upsert_notification(&self, notification: Notification) -> AppResult<()> {
+        kv_upsert(&self.conn, "notifications", &notification.id, &notification).await
+    }
+
+    pub async fn delete_notification(&self, id: &str) -> AppResult<()> {
+        kv_delete(&self.conn, "notifications", id).await
+    }
+
+    pub async fn unread_notification_count(&self, user_id: &str) -> AppResult<usize> {
+        let items = self.list_notifications_for_user(user_id).await?;
+        Ok(items.into_iter().filter(|n| !n.read).count())
+    }
+
+    pub async fn mark_all_notifications_read(&self, user_id: &str) -> AppResult<usize> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let items = self.list_notifications_for_user(user_id).await?;
+        let mut updated = 0usize;
+        for mut n in items {
+            if n.read {
+                continue;
+            }
+            n.read = true;
+            n.read_at = Some(now.clone());
+            self.upsert_notification(n).await?;
+            updated += 1;
+        }
+        Ok(updated)
+    }
+
+    /// Tworzy powiadomienie dla jednego użytkownika.
+    pub async fn create_notification(
+        &self,
+        user_id: &str,
+        title: &str,
+        body: &str,
+        kind: &str,
+        href: Option<&str>,
+    ) -> AppResult<Notification> {
+        let notification = Notification {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            kind: kind.to_string(),
+            href: href.map(|s| s.to_string()),
+            read: false,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            read_at: None,
+        };
+        self.upsert_notification(notification.clone()).await?;
+        Ok(notification)
+    }
+
+    /// Powiadamia aktywnych użytkowników z rolami kadry (trener / admin / superadmin).
+    pub async fn notify_staff(
+        &self,
+        title: &str,
+        body: &str,
+        kind: &str,
+        href: Option<&str>,
+        exclude_user_id: Option<&str>,
+    ) -> AppResult<usize> {
+        let staff_roles = [Role::Trener, Role::Admin, Role::Superadmin];
+        let users = self.list_users().await?;
+        let mut count = 0usize;
+        for user in users {
+            if !user.is_active {
+                continue;
+            }
+            if let Some(exclude) = exclude_user_id {
+                if user.id == exclude {
+                    continue;
+                }
+            }
+            let is_staff = user
+                .roles
+                .iter()
+                .any(|r| staff_roles.contains(r));
+            if !is_staff {
+                continue;
+            }
+            self.create_notification(&user.id, title, body, kind, href)
+                .await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     // --- logs ---
 
     pub async fn list_logs(&self, limit: usize) -> AppResult<Vec<SystemLog>> {
@@ -465,6 +730,18 @@ impl Database {
         message: &str,
         actor_id: Option<&str>,
     ) -> AppResult<()> {
+        match level {
+            LogLevel::Info => {
+                tracing::info!(source, actor_id, "{message}");
+            }
+            LogLevel::Warn => {
+                tracing::warn!(source, actor_id, "{message}");
+            }
+            LogLevel::Error => {
+                tracing::error!(source, actor_id, "{message}");
+            }
+        }
+
         let log = SystemLog {
             id: uuid::Uuid::new_v4().to_string(),
             level,
@@ -736,6 +1013,11 @@ impl Database {
             "attendance" => values_from_list(self.list_attendance_raw().await?),
             "training_plans" => values_from_list(self.list_plans().await?),
             "plan_progress" => values_from_list(self.list_plan_progress().await?),
+            "contact_messages" => values_from_list(self.list_contact_messages().await?),
+            "notifications" => {
+                let items: Vec<Notification> = kv_list(&self.conn, "notifications").await?;
+                values_from_list(items)
+            }
             "meta" => self.list_meta_raw().await,
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
         }
@@ -788,9 +1070,11 @@ impl Database {
                     .to_string();
                 self.upsert_meta(key, &value).await
             }
-            "users" | "system_logs" | "plan_progress" => Err(AppError::Forbidden(
-                "Edycja tej tabeli tylko przez dedykowane API.".into(),
-            )),
+            "users" | "system_logs" | "plan_progress" | "notifications" | "contact_messages" => {
+                Err(AppError::Forbidden(
+                    "Edycja tej tabeli tylko przez dedykowane API.".into(),
+                ))
+            }
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
         }
     }
@@ -807,6 +1091,8 @@ impl Database {
             "users" => self.delete_user(id).await,
             "system_logs" => kv_delete(&self.conn, "system_logs", id).await,
             "plan_progress" => kv_delete(&self.conn, "plan_progress", id).await,
+            "contact_messages" => self.delete_contact_message(id).await,
+            "notifications" => self.delete_notification(id).await,
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
         }
     }

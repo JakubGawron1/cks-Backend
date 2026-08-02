@@ -1,29 +1,42 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::extractor::{ensure_roles, AuthUser};
 use crate::error::{AppError, AppResult};
 use crate::models::club::{AttendanceRecord, AttendanceSession, LogLevel};
 use crate::models::role::Role;
+use crate::models::user::ErrorBody;
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CheckInBody {
     pub token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct AttendanceQuery {
     pub user_id: Option<String>,
     pub day: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshSessionBody {
     pub label: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/attendance/session",
+    responses(
+        (status = 200, description = "Aktualna sesja obecności (kod QR)", body = AttendanceSession),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+        (status = 404, description = "Brak sesji obecności", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn get_session(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -35,6 +48,17 @@ pub async fn get_session(
     Ok(Json(session))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/attendance/session",
+    request_body = RefreshSessionBody,
+    responses(
+        (status = 200, description = "Odświeżono kod QR obecności", body = AttendanceSession),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn refresh_session(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -65,6 +89,17 @@ pub async fn refresh_session(
     Ok(Json(session))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/attendance",
+    params(AttendanceQuery),
+    responses(
+        (status = 200, description = "Lista obecności", body = Vec<AttendanceRecord>),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn list_attendance(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -87,6 +122,18 @@ pub async fn list_attendance(
     Ok(Json(items))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/attendance",
+    request_body = CheckInBody,
+    responses(
+        (status = 200, description = "Zarejestrowano obecność", body = AttendanceRecord),
+        (status = 400, description = "Nieprawidłowe dane wejściowe", body = ErrorBody),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn check_in(
     State(state): State<AppState>,
     auth: AuthUser,

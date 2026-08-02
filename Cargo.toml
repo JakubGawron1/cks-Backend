@@ -9,20 +9,25 @@ opt-level = 3
 
 [dependencies]
 anyhow = "1"
-argon2 = "0.5"
-axum = { version = "0.8", features = ["macros"] }
+argon2 = { version = "0.6.0-rc.8", features = ["getrandom"] }
+axum = { version = "0.8", features = ["macros", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
-jsonwebtoken = "9"
-password-hash = "0.5"
-rand_core = { version = "0.6", features = ["getrandom"] }
+jsonwebtoken = { version = "11.0.0", default-features = false, features = ["use_pem", "rust_crypto"] }
+password-hash = "0.6.1"
+rand_core = "0.10.1"
 # Lokalnie: plik SQLite/libSQL. Produkcja: Turso (remote HTTP + tls).
 libsql = { version = "0.9", default-features = false, features = ["core", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-axum = "0.2"
+utoipa-scalar = { version = "0.3", features = ["axum"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }

@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 use crate::auth::extractor::{ensure_roles, AuthUser};
 use crate::error::{AppError, AppResult};
@@ -8,9 +9,10 @@ use crate::models::club::{
     LogLevel, PlanExercise, PlanProgressEntry, TrainingPlan, TrainingPlanProgress,
 };
 use crate::models::role::Role;
+use crate::models::user::{ErrorBody, OkResponse};
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PlanBody {
     pub title: String,
     pub description: Option<String>,
@@ -19,7 +21,7 @@ pub struct PlanBody {
     pub assigned_user_ids: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ProgressBody {
     pub entries: Vec<PlanProgressEntry>,
 }
@@ -28,6 +30,16 @@ fn is_plan_editor(auth: &AuthUser) -> bool {
     auth.roles().contains(&Role::Trener) || auth.roles().contains(&Role::Superadmin)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/plans",
+    responses(
+        (status = 200, description = "Lista planów treningowych", body = Vec<TrainingPlan>),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn list_plans(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -39,6 +51,18 @@ pub async fn list_plans(
     Ok(Json(state.db.plans_for_user(&auth.user.id).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/plans",
+    request_body = PlanBody,
+    responses(
+        (status = 200, description = "Utworzono plan treningowy", body = TrainingPlan),
+        (status = 400, description = "Nieprawidłowe dane wejściowe", body = ErrorBody),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn create_plan(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -73,6 +97,19 @@ pub async fn create_plan(
     Ok(Json(plan))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/plans/{id}",
+    params(("id" = String, Path, description = "ID planu")),
+    request_body = PlanBody,
+    responses(
+        (status = 200, description = "Zaktualizowano plan treningowy", body = TrainingPlan),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+        (status = 404, description = "Plan nie istnieje", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn update_plan(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -108,11 +145,22 @@ pub async fn update_plan(
     Ok(Json(plan))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/plans/{id}",
+    params(("id" = String, Path, description = "ID planu")),
+    responses(
+        (status = 200, description = "Usunięto plan treningowy", body = OkResponse),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn delete_plan(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<OkResponse>> {
     ensure_roles(&auth, &[Role::Trener])?;
     if !is_plan_editor(&auth) {
         return Err(AppError::Forbidden("Brak uprawnień do edycji planów.".into()));
@@ -124,9 +172,20 @@ pub async fn delete_plan(
         &format!("Usunięto plan {id}"),
         Some(&auth.user.id),
     ).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(OkResponse { ok: true }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/plans/{id}/progress",
+    params(("id" = String, Path, description = "ID planu")),
+    responses(
+        (status = 200, description = "Postęp realizacji planu", body = TrainingPlanProgress),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn get_my_progress(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -145,6 +204,19 @@ pub async fn get_my_progress(
     }))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/plans/{id}/progress",
+    params(("id" = String, Path, description = "ID planu")),
+    request_body = ProgressBody,
+    responses(
+        (status = 200, description = "Zapisano postęp realizacji planu", body = TrainingPlanProgress),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+        (status = 404, description = "Plan nie istnieje", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn save_progress(
     State(state): State<AppState>,
     auth: AuthUser,

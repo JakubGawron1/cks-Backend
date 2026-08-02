@@ -1,10 +1,15 @@
 use axum::response::Html;
-use axum::routing::{delete, get, patch, post};
-use axum::{Json, Router};
-use serde_json::{json, Value};
+use axum::routing::get;
+use axum::Json;
+use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
+use utoipa_scalar::{Scalar, Servable as ScalarServable};
+use utoipa_swagger_ui::SwaggerUi;
 
-use crate::auth::handlers::{login, me};
 use crate::handlers;
+use crate::models::club::HealthResponse;
+use crate::openapi::ApiDoc;
 use crate::state::AppState;
 
 const INDEX_HTML: &str = r#"<!DOCTYPE html>
@@ -25,21 +30,15 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       background: linear-gradient(160deg, #0f172a 0%, #1e293b 50%, #0f766e 100%);
       color: #f8fafc;
     }
-    main {
-      text-align: center;
-      padding: 2rem;
-    }
+    main { text-align: center; padding: 2rem; }
     h1 {
       margin: 0 0 0.5rem;
       font-size: clamp(1.75rem, 4vw, 2.5rem);
       font-weight: 700;
       letter-spacing: -0.02em;
     }
-    p {
-      margin: 0 0 1.75rem;
-      opacity: 0.8;
-      font-size: 1rem;
-    }
+    p { margin: 0 0 1.75rem; opacity: 0.8; font-size: 1rem; }
+    .links { display: flex; flex-wrap: wrap; gap: 0.75rem; justify-content: center; }
     a.btn {
       display: inline-block;
       padding: 0.85rem 1.5rem;
@@ -54,13 +53,19 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
       transform: translateY(-1px);
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
     }
+    a.btn.secondary { background: transparent; color: #f8fafc; border: 1px solid #94a3b8; }
   </style>
 </head>
 <body>
   <main>
     <h1>Backend CKS Slavia</h1>
-    <p>API klubu — Axum / Rust</p>
-    <a class="btn" href="https://slavia.vercel.app/">Przejdź do strony klubu</a>
+    <p>API klubu — Axum / Rust / OpenAPI</p>
+    <div class="links">
+      <a class="btn" href="https://slavia.vercel.app/">Strona klubu</a>
+      <a class="btn secondary" href="/api/docs">Scalar</a>
+      <a class="btn secondary" href="/api/swagger">Swagger UI</a>
+      <a class="btn secondary" href="/api/openapi.json">openapi.json</a>
+    </div>
   </main>
 </body>
 </html>"#;
@@ -69,81 +74,143 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "service": "slavia-backend",
-        "auth": true
-    }))
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    responses(
+        (status = 200, description = "OK", body = HealthResponse)
+    ),
+    tag = "admin"
+)]
+async fn health() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".into(),
+        service: "slavia-backend".into(),
+        auth: true,
+    })
 }
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
+/// Buduje router API + pełny dokument OpenAPI (ścieżki z handlerów).
+pub fn openapi_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(health))
+        .routes(routes!(crate::auth::handlers::login))
+        .routes(routes!(
+            crate::auth::handlers::me,
+            crate::auth::handlers::update_me
+        ))
+        .routes(routes!(
+            handlers::users::list_users,
+            handlers::users::create_user
+        ))
+        .routes(routes!(
+            handlers::users::update_user,
+            handlers::users::delete_user
+        ))
+        .routes(routes!(
+            handlers::profiles::list_profiles,
+            handlers::profiles::create_profile
+        ))
+        .routes(routes!(
+            handlers::profiles::update_profile,
+            handlers::profiles::delete_profile
+        ))
+        .routes(routes!(handlers::profiles::list_public_profiles))
+        .routes(routes!(
+            handlers::results::list_results,
+            handlers::results::create_result
+        ))
+        .routes(routes!(handlers::results::update_result))
+        .routes(routes!(handlers::results::list_public_results))
+        .routes(routes!(
+            handlers::cms::list_cms_pages,
+            handlers::cms::create_cms_page
+        ))
+        .routes(routes!(
+            handlers::cms::update_cms_page,
+            handlers::cms::delete_cms_page
+        ))
+        .routes(routes!(handlers::logs::list_logs))
+        .routes(routes!(handlers::flags::list_flags))
+        .routes(routes!(handlers::flags::update_flag))
+        .routes(routes!(handlers::flags::list_public_flags))
+        .routes(routes!(handlers::stats::site_stats))
+        .routes(routes!(handlers::db_admin::db_list_tables))
+        .routes(routes!(
+            handlers::db_admin::db_list_rows,
+            handlers::db_admin::db_upsert_row
+        ))
+        .routes(routes!(handlers::db_admin::db_delete_row))
+        .routes(routes!(handlers::preview::preview_start))
+        .routes(routes!(handlers::preview::preview_stop))
+        .routes(routes!(handlers::athlete::athlete_stats))
+        .routes(routes!(
+            handlers::attendance::get_session,
+            handlers::attendance::refresh_session
+        ))
+        .routes(routes!(
+            handlers::attendance::list_attendance,
+            handlers::attendance::check_in
+        ))
+        .routes(routes!(
+            handlers::plans::list_plans,
+            handlers::plans::create_plan
+        ))
+        .routes(routes!(
+            handlers::plans::update_plan,
+            handlers::plans::delete_plan
+        ))
+        .routes(routes!(
+            handlers::plans::get_my_progress,
+            handlers::plans::save_progress
+        ))
+        .routes(routes!(handlers::contact::submit_contact))
+        .routes(routes!(
+            handlers::contact::list_contact_messages,
+            handlers::contact::update_contact_message,
+            handlers::contact::delete_contact_message
+        ))
+        .routes(routes!(handlers::notifications::list_notifications))
+        .routes(routes!(handlers::notifications::unread_count))
+        .routes(routes!(handlers::notifications::mark_all_read))
+        .routes(routes!(handlers::notifications::update_notification))
+        .routes(routes!(
+            handlers::uploads::upload_image,
+            handlers::uploads::delete_image
+        ))
+}
+
+pub fn router(state: AppState) -> axum::Router {
+    let (router, api) = openapi_router().split_for_parts();
+
+    // Domyślny limit Axum to 2 MiB — za mało na zdjęcia telefonów.
+    // 6 MiB: MAX_IMAGE_BYTES (5) + narzut multipart.
+    router
         .route("/", get(index))
-        .route("/api/health", get(health))
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/me", get(me))
-        .route("/api/users", get(handlers::list_users).post(handlers::create_user))
-        .route(
-            "/api/users/{id}",
-            patch(handlers::update_user).delete(handlers::delete_user),
-        )
-        .route(
-            "/api/profiles",
-            get(handlers::list_profiles).post(handlers::create_profile),
-        )
-        .route(
-            "/api/profiles/{id}",
-            patch(handlers::update_profile).delete(handlers::delete_profile),
-        )
-        .route(
-            "/api/results",
-            get(handlers::list_results).post(handlers::create_result),
-        )
-        .route("/api/results/{id}", patch(handlers::update_result))
-        .route(
-            "/api/cms/pages",
-            get(handlers::list_cms_pages).post(handlers::create_cms_page),
-        )
-        .route(
-            "/api/cms/pages/{id}",
-            patch(handlers::update_cms_page).delete(handlers::delete_cms_page),
-        )
-        .route("/api/logs", get(handlers::list_logs))
-        .route("/api/admin/flags", get(handlers::list_flags))
-        .route("/api/admin/flags/{key}", patch(handlers::update_flag))
-        .route("/api/admin/stats", get(handlers::site_stats))
-        .route("/api/admin/db/tables", get(handlers::db_list_tables))
-        .route(
-            "/api/admin/db/{table}",
-            get(handlers::db_list_rows).post(handlers::db_upsert_row),
-        )
-        .route(
-            "/api/admin/db/{table}/{id}",
-            delete(handlers::db_delete_row),
-        )
-        .route("/api/admin/preview/start", post(handlers::preview_start))
-        .route("/api/admin/preview/stop", post(handlers::preview_stop))
-        .route("/api/athlete/stats", get(handlers::athlete_stats))
-        .route(
-            "/api/attendance/session",
-            get(handlers::get_session).post(handlers::refresh_session),
-        )
-        .route(
-            "/api/attendance",
-            get(handlers::list_attendance).post(handlers::check_in),
-        )
-        .route(
-            "/api/plans",
-            get(handlers::list_plans).post(handlers::create_plan),
-        )
-        .route(
-            "/api/plans/{id}",
-            patch(handlers::update_plan).delete(handlers::delete_plan),
-        )
-        .route(
-            "/api/plans/{id}/progress",
-            get(handlers::get_my_progress).put(handlers::save_progress),
-        )
+        .merge(SwaggerUi::new("/api/swagger").url("/api/openapi.json", api.clone()))
+        .merge(Scalar::with_url("/api/docs", api))
+        .layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod export_tests {
+    use std::path::PathBuf;
+
+    use super::openapi_router;
+
+    #[test]
+    #[ignore = "uruchamiaj: cargo test export_openapi -- --ignored"]
+    fn export_openapi() {
+        let (_router, api) = openapi_router().split_for_parts();
+        let json = api.to_pretty_json().expect("serialize openapi");
+        let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("slavia-frontend")
+            .join("openapi")
+            .join("openapi.json");
+        std::fs::create_dir_all(out.parent().unwrap()).expect("mkdir openapi");
+        std::fs::write(&out, &json).expect("write openapi.json");
+        eprintln!("Wrote {} ({} bytes)", out.display(), json.len());
+    }
 }

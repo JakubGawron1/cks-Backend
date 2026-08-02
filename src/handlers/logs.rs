@@ -1,20 +1,33 @@
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
+use utoipa::IntoParams;
 
 use crate::auth::extractor::{ensure_roles, AuthUser};
 use crate::error::AppResult;
 use crate::models::club::SystemLog;
 use crate::models::role::Role;
+use crate::models::user::ErrorBody;
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct LogsQuery {
     pub limit: Option<usize>,
     pub source: Option<String>,
     pub level: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/logs",
+    params(LogsQuery),
+    responses(
+        (status = 200, description = "Lista logów systemowych", body = Vec<SystemLog>),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []))
+)]
 pub async fn list_logs(
     State(state): State<AppState>,
     auth: AuthUser,

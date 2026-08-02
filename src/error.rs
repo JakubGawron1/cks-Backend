@@ -1,8 +1,9 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
 use thiserror::Error;
+
+use crate::models::user::ErrorBody;
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -16,11 +17,6 @@ pub enum AppError {
     NotFound(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
-}
-
-#[derive(Serialize)]
-struct ErrorBody {
-    error: String,
 }
 
 impl AppError {
@@ -41,10 +37,25 @@ impl IntoResponse for AppError {
 
         let message = match &self {
             AppError::Internal(err) => {
-                tracing::error!("internal error: {err:?}");
+                tracing::error!(status = %status.as_u16(), error = ?err, "internal error");
                 "Wewnętrzny błąd serwera.".to_string()
             }
-            other => other.to_string(),
+            AppError::BadRequest(msg) => {
+                tracing::warn!(status = %status.as_u16(), message = %msg, "bad request");
+                msg.clone()
+            }
+            AppError::Unauthorized(msg) => {
+                tracing::warn!(status = %status.as_u16(), message = %msg, "unauthorized");
+                msg.clone()
+            }
+            AppError::Forbidden(msg) => {
+                tracing::warn!(status = %status.as_u16(), message = %msg, "forbidden");
+                msg.clone()
+            }
+            AppError::NotFound(msg) => {
+                tracing::warn!(status = %status.as_u16(), message = %msg, "not found");
+                msg.clone()
+            }
         };
 
         (status, Json(ErrorBody { error: message })).into_response()

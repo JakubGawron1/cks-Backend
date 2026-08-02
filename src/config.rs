@@ -4,6 +4,8 @@ use axum::http::{HeaderValue, Method};
 use thiserror::Error;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::images::ImageProvider;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductionMode {
     Dev,
@@ -31,6 +33,11 @@ pub struct Config {
     pub frontend_origins: Vec<String>,
     pub seed_superadmin_email: String,
     pub seed_superadmin_password: String,
+    /// Domyślnie ImageKit; Cloudinary — później (Todo.md).
+    pub image_provider: ImageProvider,
+    pub imagekit_public_key: Option<String>,
+    pub imagekit_private_key: Option<String>,
+    pub imagekit_url_endpoint: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -177,6 +184,25 @@ impl Config {
             ));
         }
 
+        let image_provider = match std::env::var("IMAGE_PROVIDER") {
+            Ok(raw) => ImageProvider::parse(&raw).ok_or_else(|| {
+                ConfigError::Invalid(
+                    "IMAGE_PROVIDER musi być 'imagekit' lub 'cloudinary'".into(),
+                )
+            })?,
+            Err(_) => ImageProvider::Imagekit,
+        };
+
+        let imagekit_public_key = std::env::var("IMAGEKIT_PUBLIC_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let imagekit_private_key = std::env::var("IMAGEKIT_PRIVATE_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let imagekit_url_endpoint = std::env::var("IMAGEKIT_URL_ENDPOINT")
+            .ok()
+            .filter(|v| !v.is_empty());
+
         Ok(Self {
             production_mode,
             database_url,
@@ -188,6 +214,10 @@ impl Config {
             frontend_origins,
             seed_superadmin_email,
             seed_superadmin_password,
+            image_provider,
+            imagekit_public_key,
+            imagekit_private_key,
+            imagekit_url_endpoint,
         })
     }
 

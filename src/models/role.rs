@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Role klubowe — można łączyć (np. zawodnik + trener).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
+#[schema(rename_all = "lowercase")]
 pub enum Role {
     Zawodnik,
     Trener,

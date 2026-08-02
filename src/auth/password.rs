@@ -1,13 +1,12 @@
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
-use rand_core::OsRng;
 
 use crate::error::{internal, AppResult};
 
 pub fn hash_password(password: &str) -> AppResult<String> {
-    let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(internal)?
         .to_string();
     Ok(hash)
