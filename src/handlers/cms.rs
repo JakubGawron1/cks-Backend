@@ -21,7 +21,7 @@ pub async fn list_cms_pages(
     auth: AuthUser,
 ) -> AppResult<Json<Vec<CmsPage>>> {
     ensure_roles(&auth, &[Role::Admin])?;
-    Ok(Json(state.db.list_cms_pages()?))
+    Ok(Json(state.db.list_cms_pages().await?))
 }
 
 pub async fn create_cms_page(
@@ -42,13 +42,13 @@ pub async fn create_cms_page(
         created_at: now.clone(),
         updated_at: now,
     };
-    state.db.upsert_cms_page(page.clone())?;
+    state.db.upsert_cms_page(page.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "cms",
         &format!("Utworzono stronę CMS /{}", page.slug),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(page))
 }
 
@@ -63,7 +63,7 @@ pub async fn update_cms_page(
 
     let existing = state
         .db
-        .get_cms_page(&id)?
+        .get_cms_page(&id).await?
         .ok_or_else(|| AppError::NotFound("Strona CMS nie istnieje.".into()))?;
 
     let page = CmsPage {
@@ -75,13 +75,13 @@ pub async fn update_cms_page(
         created_at: existing.created_at,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    state.db.upsert_cms_page(page.clone())?;
+    state.db.upsert_cms_page(page.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "cms",
         &format!("Zaktualizowano stronę CMS /{}", page.slug),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(page))
 }
 
@@ -91,13 +91,13 @@ pub async fn delete_cms_page(
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     ensure_roles(&auth, &[Role::Admin])?;
-    state.db.delete_cms_page(&id)?;
+    state.db.delete_cms_page(&id).await?;
     state.db.append_log(
         LogLevel::Warn,
         "cms",
         &format!("Usunięto stronę CMS {id}"),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

@@ -22,7 +22,7 @@ pub async fn list_logs(
 ) -> AppResult<Json<Vec<SystemLog>>> {
     ensure_roles(&auth, &[Role::Admin])?;
     let limit = query.limit.unwrap_or(200).min(1000);
-    let mut logs = state.db.list_logs(limit)?;
+    let mut logs = state.db.list_logs(limit).await?;
 
     if let Some(source) = query.source {
         logs.retain(|l| l.source == source);

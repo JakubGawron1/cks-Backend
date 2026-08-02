@@ -22,7 +22,7 @@ pub async fn list_profiles(
     auth: AuthUser,
 ) -> AppResult<Json<Vec<AthleteProfile>>> {
     ensure_roles(&auth, &[Role::Trener, Role::Admin])?;
-    Ok(Json(state.db.list_profiles()?))
+    Ok(Json(state.db.list_profiles().await?))
 }
 
 pub async fn create_profile(
@@ -47,13 +47,13 @@ pub async fn create_profile(
         created_at: now.clone(),
         updated_at: now,
     };
-    state.db.upsert_profile(profile.clone())?;
+    state.db.upsert_profile(profile.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "profiles",
         &format!("Utworzono profil {}", profile.display_name),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(profile))
 }
 
@@ -67,7 +67,7 @@ pub async fn update_profile(
 
     let existing = state
         .db
-        .get_profile(&id)?
+        .get_profile(&id).await?
         .ok_or_else(|| AppError::NotFound("Profil nie istnieje.".into()))?;
 
     let profile = AthleteProfile {
@@ -80,13 +80,13 @@ pub async fn update_profile(
         created_at: existing.created_at,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    state.db.upsert_profile(profile.clone())?;
+    state.db.upsert_profile(profile.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "profiles",
         &format!("Zaktualizowano profil {}", profile.display_name),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(profile))
 }
 
@@ -96,12 +96,12 @@ pub async fn delete_profile(
     Path(id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     ensure_roles(&auth, &[Role::Trener, Role::Admin])?;
-    state.db.delete_profile(&id)?;
+    state.db.delete_profile(&id).await?;
     state.db.append_log(
         LogLevel::Warn,
         "profiles",
         &format!("Usunięto profil {id}"),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

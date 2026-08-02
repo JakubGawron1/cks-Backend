@@ -27,6 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
+    tracing::info!(
+        "PRODUCTION_MODE={}, remote_db={}",
+        config.production_mode.as_str(),
+        config.is_remote_db()
+    );
     if Config::is_hosted() {
         let host = if Config::is_huggingface() {
             "Hugging Face Space"
@@ -40,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         if !config.is_remote_db() {
             tracing::warn!(
-                "Baza plikowa na hostingu jest efemeryczna (znika po redeploy/śnie). Rozważ Turso."
+                "Baza plikowa na hostingu jest efemeryczna — ustaw Turso (PRODUCTION_MODE=production)."
             );
         }
     }

@@ -32,7 +32,8 @@ USER appuser
 
 ENV HOST=0.0.0.0
 ENV PORT=8080
-ENV DATABASE_URL=file:/app/data/slavia.redb
+# Produkcja: ustaw w Space secrets PRODUCTION_MODE=production, DATABASE_URL, TURSO_AUTH_TOKEN
+ENV PRODUCTION_MODE=production
 ENV RUST_LOG=slavia_backend=info,tower_http=info,axum=info
 
 EXPOSE 8080

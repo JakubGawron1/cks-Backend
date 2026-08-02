@@ -33,7 +33,7 @@ pub async fn list_users(
     ensure_roles(&auth, &[Role::Admin])?;
     let users = state
         .db
-        .list_users()?
+        .list_users().await?
         .iter()
         .map(PublicUser::from)
         .collect();
@@ -68,14 +68,14 @@ pub async fn create_user(
         &body.password,
         &body.display_name,
         body.roles,
-    )?;
+    ).await?;
 
     state.db.append_log(
         LogLevel::Info,
         "users",
         &format!("Utworzono konto {}", user.email),
         Some(&auth.user.id),
-    )?;
+    ).await?;
 
     Ok(Json(PublicUser::from(&user)))
 }
@@ -120,13 +120,13 @@ pub async fn update_user(
         }
     }
 
-    state.db.update_user(&user)?;
+    state.db.update_user(&user).await?;
     state.db.append_log(
         LogLevel::Info,
         "users",
         &format!("Zaktualizowano konto {}", user.email),
         Some(&auth.user.id),
-    )?;
+    ).await?;
 
     Ok(Json(PublicUser::from(&user)))
 }
@@ -144,13 +144,13 @@ pub async fn delete_user(
         .await?
         .ok_or_else(|| AppError::NotFound("Użytkownik nie istnieje.".into()))?;
 
-    state.db.delete_user(&id)?;
+    state.db.delete_user(&id).await?;
     state.db.append_log(
         LogLevel::Warn,
         "users",
         &format!("Usunięto konto {}", target.email),
         Some(&auth.user.id),
-    )?;
+    ).await?;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }

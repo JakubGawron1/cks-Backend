@@ -16,8 +16,8 @@ dotenvy = "0.15"
 jsonwebtoken = "9"
 password-hash = "0.5"
 rand_core = { version = "0.6", features = ["getrandom"] }
-# Lokalna baza plikowa (pure Rust). Na Linux/Docker + Turso: patrz README (libsql).
-redb = "2"
+# Lokalnie: plik SQLite/libSQL. Produkcja: Turso (remote HTTP).
+libsql = { version = "0.9", default-features = false, features = ["core", "remote"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

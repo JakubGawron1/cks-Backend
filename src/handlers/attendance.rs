@@ -29,7 +29,7 @@ pub async fn get_session(
     auth: AuthUser,
 ) -> AppResult<Json<AttendanceSession>> {
     ensure_roles(&auth, &[Role::Trener, Role::Admin])?;
-    let session = state.db.get_attendance_session()?.ok_or_else(|| {
+    let session = state.db.get_attendance_session().await?.ok_or_else(|| {
         AppError::NotFound("Brak sesji obecności — odśwież kod QR.".into())
     })?;
     Ok(Json(session))
@@ -42,7 +42,7 @@ pub async fn refresh_session(
 ) -> AppResult<Json<AttendanceSession>> {
     ensure_roles(&auth, &[Role::Trener, Role::Admin])?;
     let now = chrono::Utc::now().to_rfc3339();
-    let prev = state.db.get_attendance_session()?;
+    let prev = state.db.get_attendance_session().await?;
     let session = AttendanceSession {
         token: uuid::Uuid::new_v4().to_string(),
         label: body
@@ -55,13 +55,13 @@ pub async fn refresh_session(
             .unwrap_or_else(|| now.clone()),
         refreshed_at: now,
     };
-    state.db.set_attendance_session(session.clone())?;
+    state.db.set_attendance_session(session.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "attendance",
         "Odświeżono kod QR obecności",
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(session))
 }
 
@@ -71,7 +71,7 @@ pub async fn list_attendance(
     Query(query): Query<AttendanceQuery>,
 ) -> AppResult<Json<Vec<AttendanceRecord>>> {
     ensure_roles(&auth, &[Role::Trener, Role::Admin, Role::Zawodnik])?;
-    let mut items = state.db.list_attendance_in_window()?;
+    let mut items = state.db.list_attendance_in_window().await?;
 
     // Zawodnik widzi tylko własne
     if !crate::models::role::has_any_role(auth.roles(), &[Role::Trener, Role::Admin]) {
@@ -101,12 +101,12 @@ pub async fn check_in(
         &auth.user.id,
         &auth.user.display_name,
         token,
-    )?;
+    ).await?;
     state.db.append_log(
         LogLevel::Info,
         "attendance",
         &format!("Check-in: {}", auth.user.email),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(record))
 }

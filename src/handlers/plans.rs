@@ -34,9 +34,9 @@ pub async fn list_plans(
 ) -> AppResult<Json<Vec<TrainingPlan>>> {
     ensure_roles(&auth, &[Role::Zawodnik, Role::Trener])?;
     if is_plan_editor(&auth) {
-        return Ok(Json(state.db.list_plans()?));
+        return Ok(Json(state.db.list_plans().await?));
     }
-    Ok(Json(state.db.plans_for_user(&auth.user.id)?))
+    Ok(Json(state.db.plans_for_user(&auth.user.id).await?))
 }
 
 pub async fn create_plan(
@@ -63,13 +63,13 @@ pub async fn create_plan(
         created_at: now.clone(),
         updated_at: now,
     };
-    state.db.upsert_plan(plan.clone())?;
+    state.db.upsert_plan(plan.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "plans",
         &format!("Utworzono plan {}", plan.title),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(plan))
 }
 
@@ -85,7 +85,7 @@ pub async fn update_plan(
     }
     let existing = state
         .db
-        .get_plan(&id)?
+        .get_plan(&id).await?
         .ok_or_else(|| AppError::NotFound("Plan nie istnieje.".into()))?;
     let plan = TrainingPlan {
         id: existing.id,
@@ -98,13 +98,13 @@ pub async fn update_plan(
         created_at: existing.created_at,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    state.db.upsert_plan(plan.clone())?;
+    state.db.upsert_plan(plan.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "plans",
         &format!("Zaktualizowano plan {}", plan.title),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(plan))
 }
 
@@ -117,13 +117,13 @@ pub async fn delete_plan(
     if !is_plan_editor(&auth) {
         return Err(AppError::Forbidden("Brak uprawnień do edycji planów.".into()));
     }
-    state.db.delete_plan(&id)?;
+    state.db.delete_plan(&id).await?;
     state.db.append_log(
         LogLevel::Warn,
         "plans",
         &format!("Usunięto plan {id}"),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -133,7 +133,7 @@ pub async fn get_my_progress(
     Path(plan_id): Path<String>,
 ) -> AppResult<Json<TrainingPlanProgress>> {
     ensure_roles(&auth, &[Role::Zawodnik, Role::Trener])?;
-    if let Some(p) = state.db.get_plan_progress(&plan_id, &auth.user.id)? {
+    if let Some(p) = state.db.get_plan_progress(&plan_id, &auth.user.id).await? {
         return Ok(Json(p));
     }
     Ok(Json(TrainingPlanProgress {
@@ -154,7 +154,7 @@ pub async fn save_progress(
     ensure_roles(&auth, &[Role::Zawodnik, Role::Trener])?;
     let plan = state
         .db
-        .get_plan(&plan_id)?
+        .get_plan(&plan_id).await?
         .ok_or_else(|| AppError::NotFound("Plan nie istnieje.".into()))?;
     if !plan.assigned_user_ids.is_empty()
         && !plan.assigned_user_ids.contains(&auth.user.id)
@@ -172,6 +172,6 @@ pub async fn save_progress(
         entries: body.entries,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
-    state.db.upsert_plan_progress(progress.clone())?;
+    state.db.upsert_plan_progress(progress.clone()).await?;
     Ok(Json(progress))
 }

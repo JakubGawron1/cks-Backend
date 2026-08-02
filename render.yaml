@@ -16,8 +16,12 @@ services:
         generateValue: true
       - key: JWT_EXPIRY_HOURS
         value: "72"
+      - key: PRODUCTION_MODE
+        value: production
       - key: DATABASE_URL
-        value: file:/app/data/slavia.redb
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
       - key: HOST
         value: 0.0.0.0
       - key: RUST_LOG

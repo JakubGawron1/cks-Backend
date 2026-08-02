@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use redb::{Database as RedbDatabase, ReadableTable, TableDefinition};
+use libsql::{params, Builder, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -15,17 +14,6 @@ use crate::models::club::{
 };
 use crate::models::role::{has_role, roles_from_json, roles_to_json, Role};
 use crate::models::user::UserRecord;
-
-const USERS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("users");
-const META_TABLE: TableDefinition<&str, &str> = TableDefinition::new("meta");
-const PROFILES_TABLE: TableDefinition<&str, &str> = TableDefinition::new("athlete_profiles");
-const FLAGS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("feature_flags");
-const RESULTS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("competition_results");
-const CMS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("cms_pages");
-const LOGS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("system_logs");
-const ATTENDANCE_TABLE: TableDefinition<&str, &str> = TableDefinition::new("attendance");
-const PLANS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("training_plans");
-const PLAN_PROGRESS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("plan_progress");
 
 pub const MANAGED_TABLES: &[&str] = &[
     "users",
@@ -85,48 +73,59 @@ impl From<&UserRecord> for StoredUser {
 
 #[derive(Clone)]
 pub struct Database {
-    inner: Arc<RedbDatabase>,
+    conn: Connection,
 }
 
 impl Database {
     pub async fn connect(config: &Config) -> Result<Self, AppError> {
-        if config.is_remote_db() {
-            tracing::warn!(
-                "Turso URL wykryty — lokalnie używam pliku redb. Pełne libsql/Turso: włącz w Docker/Linux (README)."
+        let db = if config.is_remote_db() {
+            let token = config
+                .turso_auth_token
+                .clone()
+                .ok_or_else(|| internal("Brak TURSO_AUTH_TOKEN"))?;
+            tracing::info!(
+                "Łączenie z Turso ({})",
+                config.production_mode.as_str()
             );
-        }
+            Builder::new_remote(config.database_url.clone(), token)
+                .build()
+                .await
+                .map_err(internal)?
+        } else {
+            let path = local_db_path(config);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(internal)?;
+            }
+            tracing::info!(
+                "Lokalna baza libSQL: {} ({})",
+                path.display(),
+                config.production_mode.as_str()
+            );
+            Builder::new_local(path.to_string_lossy().as_ref())
+                .build()
+                .await
+                .map_err(internal)?
+        };
 
-        let path = local_db_path(config);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(internal)?;
-        }
-
-        let db = RedbDatabase::create(&path).map_err(internal)?;
-        Ok(Self {
-            inner: Arc::new(db),
-        })
+        let conn = db.connect().map_err(internal)?;
+        Ok(Self { conn })
     }
 
     pub async fn migrate(&self) -> AppResult<()> {
-        let write = self.inner.begin_write().map_err(internal)?;
-        {
-            let _ = write.open_table(USERS_TABLE).map_err(internal)?;
-            let _ = write.open_table(META_TABLE).map_err(internal)?;
-            let _ = write.open_table(PROFILES_TABLE).map_err(internal)?;
-            let _ = write.open_table(FLAGS_TABLE).map_err(internal)?;
-            let _ = write.open_table(RESULTS_TABLE).map_err(internal)?;
-            let _ = write.open_table(CMS_TABLE).map_err(internal)?;
-            let _ = write.open_table(LOGS_TABLE).map_err(internal)?;
-            let _ = write.open_table(ATTENDANCE_TABLE).map_err(internal)?;
-            let _ = write.open_table(PLANS_TABLE).map_err(internal)?;
-            let _ = write.open_table(PLAN_PROGRESS_TABLE).map_err(internal)?;
+        for table in MANAGED_TABLES {
+            let sql = format!(
+                "CREATE TABLE IF NOT EXISTS {table} (
+                    key TEXT PRIMARY KEY NOT NULL,
+                    value TEXT NOT NULL
+                )"
+            );
+            self.conn.execute(&sql, ()).await.map_err(internal)?;
         }
-        write.commit().map_err(internal)?;
         Ok(())
     }
 
     pub async fn seed_if_empty(&self, config: &Config) -> AppResult<()> {
-        if self.user_count()? == 0 {
+        if self.user_count().await? == 0 {
             tracing::info!("Baza pusta — tworzę konto seed superadmin");
             let now = chrono::Utc::now().to_rfc3339();
             self.insert_user(StoredUser {
@@ -138,7 +137,8 @@ impl Database {
                 is_active: true,
                 created_at: now.clone(),
                 updated_at: now,
-            })?;
+            })
+            .await?;
             tracing::info!(
                 "Seed OK — superadmin: {} (hasło z SEED_SUPERADMIN_PASSWORD)",
                 config.seed_superadmin_email
@@ -150,15 +150,10 @@ impl Database {
     }
 
     async fn seed_defaults(&self) -> AppResult<()> {
-        if self.list_flags()?.is_empty() {
+        if self.list_flags().await?.is_empty() {
             let now = chrono::Utc::now().to_rfc3339();
             for (key, label, kind, enabled) in [
-                (
-                    "public_blog",
-                    "Publiczny blog",
-                    FlagKind::Stable,
-                    true,
-                ),
+                ("public_blog", "Publiczny blog", FlagKind::Stable, true),
                 (
                     "announcements_board",
                     "Tablica ogłoszeń",
@@ -184,11 +179,12 @@ impl Database {
                     enabled,
                     kind,
                     updated_at: now.clone(),
-                })?;
+                })
+                .await?;
             }
         }
 
-        if self.list_cms_pages()?.is_empty() {
+        if self.list_cms_pages().await?.is_empty() {
             let now = chrono::Utc::now().to_rfc3339();
             self.upsert_cms_page(CmsPage {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -202,10 +198,11 @@ impl Database {
                 }],
                 created_at: now.clone(),
                 updated_at: now,
-            })?;
+            })
+            .await?;
         }
 
-        if self.list_results()?.is_empty() {
+        if self.list_results().await?.is_empty() {
             let now = chrono::Utc::now().to_rfc3339();
             self.upsert_result(CompetitionResult {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -220,52 +217,43 @@ impl Database {
                 reviewer_note: None,
                 submitted_at: now.clone(),
                 updated_at: now,
-            })?;
+            })
+            .await?;
         }
 
-        if self.get_attendance_session()?.is_none() {
+        if self.get_attendance_session().await?.is_none() {
             let now = chrono::Utc::now().to_rfc3339();
             self.set_attendance_session(AttendanceSession {
                 token: uuid::Uuid::new_v4().to_string(),
                 label: "Trening".into(),
                 created_at: now.clone(),
                 refreshed_at: now,
-            })?;
+            })
+            .await?;
         }
 
         Ok(())
     }
 
-    fn user_count(&self) -> AppResult<usize> {
-        Ok(self.list_users()?.len())
+    async fn user_count(&self) -> AppResult<usize> {
+        Ok(self.list_users().await?.len())
     }
 
-    fn insert_user(&self, user: StoredUser) -> AppResult<()> {
+    async fn insert_user(&self, user: StoredUser) -> AppResult<()> {
         let payload = serde_json::to_string(&user).map_err(internal)?;
         let email_key = user.email.to_ascii_lowercase();
-        let write = self.inner.begin_write().map_err(internal)?;
-        {
-            let mut table = write.open_table(USERS_TABLE).map_err(internal)?;
-            if table.get(email_key.as_str()).map_err(internal)?.is_some() {
-                return Err(AppError::BadRequest(
-                    "Konto z tym e-mailem już istnieje.".into(),
-                ));
-            }
-            table
-                .insert(email_key.as_str(), payload.as_str())
-                .map_err(internal)?;
+        if self.kv_get_raw("users", &email_key).await?.is_some() {
+            return Err(AppError::BadRequest(
+                "Konto z tym e-mailem już istnieje.".into(),
+            ));
         }
-        write.commit().map_err(internal)?;
-        Ok(())
+        self.kv_upsert_raw("users", &email_key, &payload).await
     }
 
-    pub fn list_users(&self) -> AppResult<Vec<UserRecord>> {
-        let read = self.inner.begin_read().map_err(internal)?;
-        let table = read.open_table(USERS_TABLE).map_err(internal)?;
+    pub async fn list_users(&self) -> AppResult<Vec<UserRecord>> {
         let mut users = Vec::new();
-        for entry in table.iter().map_err(internal)? {
-            let (_, value) = entry.map_err(internal)?;
-            let stored: StoredUser = serde_json::from_str(value.value()).map_err(internal)?;
+        for value in self.kv_list_raw("users").await? {
+            let stored: StoredUser = serde_json::from_str(&value).map_err(internal)?;
             users.push(UserRecord::from(stored));
         }
         users.sort_by(|a: &UserRecord, b: &UserRecord| a.email.cmp(&b.email));
@@ -274,12 +262,9 @@ impl Database {
 
     pub async fn find_user_by_email(&self, email: &str) -> AppResult<Option<UserRecord>> {
         let key = email.trim().to_ascii_lowercase();
-        let read = self.inner.begin_read().map_err(internal)?;
-        let table = read.open_table(USERS_TABLE).map_err(internal)?;
-        match table.get(key.as_str()).map_err(internal)? {
-            Some(access) => {
-                let stored: StoredUser =
-                    serde_json::from_str(access.value()).map_err(internal)?;
+        match self.kv_get_raw("users", &key).await? {
+            Some(payload) => {
+                let stored: StoredUser = serde_json::from_str(&payload).map_err(internal)?;
                 Ok(Some(stored.into()))
             }
             None => Ok(None),
@@ -287,7 +272,11 @@ impl Database {
     }
 
     pub async fn find_user_by_id(&self, id: &str) -> AppResult<Option<UserRecord>> {
-        Ok(self.list_users()?.into_iter().find(|u| u.id == id))
+        Ok(self
+            .list_users()
+            .await?
+            .into_iter()
+            .find(|u| u.id == id))
     }
 
     pub async fn authenticate(&self, email: &str, password: &str) -> AppResult<UserRecord> {
@@ -307,7 +296,7 @@ impl Database {
         Ok(user)
     }
 
-    pub fn create_user(
+    pub async fn create_user(
         &self,
         email: &str,
         password: &str,
@@ -325,13 +314,14 @@ impl Database {
             created_at: now.clone(),
             updated_at: now,
         };
-        self.insert_user(StoredUser::from(&user))?;
+        self.insert_user(StoredUser::from(&user)).await?;
         Ok(user)
     }
 
-    pub fn update_user(&self, user: &UserRecord) -> AppResult<()> {
+    pub async fn update_user(&self, user: &UserRecord) -> AppResult<()> {
         let existing = self
-            .list_users()?
+            .list_users()
+            .await?
             .into_iter()
             .find(|u| u.id == user.id)
             .ok_or_else(|| AppError::NotFound("Użytkownik nie istnieje.".into()))?;
@@ -339,7 +329,6 @@ impl Database {
         if has_role(&existing.roles, Role::Superadmin)
             && existing.roles.contains(&Role::Superadmin)
         {
-            // Chronione konta superadmin: nie wolno usuwać ról ani banować.
             if !user.roles.contains(&Role::Superadmin) {
                 return Err(AppError::Forbidden(
                     "Nie można usuwać roli superadmin z chronionego konta.".into(),
@@ -362,32 +351,24 @@ impl Database {
         let mut stored = StoredUser::from(user);
         stored.updated_at = chrono::Utc::now().to_rfc3339();
 
-        // Jeśli e-mail się zmienił, usuń stary klucz.
-        let write = self.inner.begin_write().map_err(internal)?;
-        {
-            let mut table = write.open_table(USERS_TABLE).map_err(internal)?;
-            let old_key = existing.email.to_ascii_lowercase();
-            let new_key = stored.email.to_ascii_lowercase();
-            if old_key != new_key {
-                if table.get(new_key.as_str()).map_err(internal)?.is_some() {
-                    return Err(AppError::BadRequest(
-                        "Konto z tym e-mailem już istnieje.".into(),
-                    ));
-                }
-                table.remove(old_key.as_str()).map_err(internal)?;
+        let old_key = existing.email.to_ascii_lowercase();
+        let new_key = stored.email.to_ascii_lowercase();
+        if old_key != new_key {
+            if self.kv_get_raw("users", &new_key).await?.is_some() {
+                return Err(AppError::BadRequest(
+                    "Konto z tym e-mailem już istnieje.".into(),
+                ));
             }
-            let payload = serde_json::to_string(&stored).map_err(internal)?;
-            table
-                .insert(new_key.as_str(), payload.as_str())
-                .map_err(internal)?;
+            self.kv_delete_raw("users", &old_key).await?;
         }
-        write.commit().map_err(internal)?;
-        Ok(())
+        let payload = serde_json::to_string(&stored).map_err(internal)?;
+        self.kv_upsert_raw("users", &new_key, &payload).await
     }
 
-    pub fn delete_user(&self, id: &str) -> AppResult<()> {
+    pub async fn delete_user(&self, id: &str) -> AppResult<()> {
         let existing = self
-            .list_users()?
+            .list_users()
+            .await?
             .into_iter()
             .find(|u| u.id == id)
             .ok_or_else(|| AppError::NotFound("Użytkownik nie istnieje.".into()))?;
@@ -399,91 +380,85 @@ impl Database {
         }
 
         let key = existing.email.to_ascii_lowercase();
-        let write = self.inner.begin_write().map_err(internal)?;
-        {
-            let mut table = write.open_table(USERS_TABLE).map_err(internal)?;
-            table.remove(key.as_str()).map_err(internal)?;
-        }
-        write.commit().map_err(internal)?;
-        Ok(())
+        self.kv_delete_raw("users", &key).await
     }
 
     // --- profiles ---
 
-    pub fn list_profiles(&self) -> AppResult<Vec<AthleteProfile>> {
-        kv_list(&self.inner, PROFILES_TABLE)
+    pub async fn list_profiles(&self) -> AppResult<Vec<AthleteProfile>> {
+        kv_list(&self.conn, "athlete_profiles").await
     }
 
-    pub fn upsert_profile(&self, profile: AthleteProfile) -> AppResult<()> {
-        kv_upsert(&self.inner, PROFILES_TABLE, &profile.id, &profile)
+    pub async fn upsert_profile(&self, profile: AthleteProfile) -> AppResult<()> {
+        kv_upsert(&self.conn, "athlete_profiles", &profile.id, &profile).await
     }
 
-    pub fn delete_profile(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.inner, PROFILES_TABLE, id)
+    pub async fn delete_profile(&self, id: &str) -> AppResult<()> {
+        kv_delete(&self.conn, "athlete_profiles", id).await
     }
 
-    pub fn get_profile(&self, id: &str) -> AppResult<Option<AthleteProfile>> {
-        kv_get(&self.inner, PROFILES_TABLE, id)
+    pub async fn get_profile(&self, id: &str) -> AppResult<Option<AthleteProfile>> {
+        kv_get(&self.conn, "athlete_profiles", id).await
     }
 
     // --- flags ---
 
-    pub fn list_flags(&self) -> AppResult<Vec<FeatureFlag>> {
-        let mut flags: Vec<FeatureFlag> = kv_list(&self.inner, FLAGS_TABLE)?;
+    pub async fn list_flags(&self) -> AppResult<Vec<FeatureFlag>> {
+        let mut flags: Vec<FeatureFlag> = kv_list(&self.conn, "feature_flags").await?;
         flags.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(flags)
     }
 
-    pub fn upsert_flag(&self, flag: FeatureFlag) -> AppResult<()> {
-        kv_upsert(&self.inner, FLAGS_TABLE, &flag.key, &flag)
+    pub async fn upsert_flag(&self, flag: FeatureFlag) -> AppResult<()> {
+        kv_upsert(&self.conn, "feature_flags", &flag.key, &flag).await
     }
 
     // --- results ---
 
-    pub fn list_results(&self) -> AppResult<Vec<CompetitionResult>> {
-        let mut items: Vec<CompetitionResult> = kv_list(&self.inner, RESULTS_TABLE)?;
+    pub async fn list_results(&self) -> AppResult<Vec<CompetitionResult>> {
+        let mut items: Vec<CompetitionResult> = kv_list(&self.conn, "competition_results").await?;
         items.sort_by(|a, b| b.submitted_at.cmp(&a.submitted_at));
         Ok(items)
     }
 
-    pub fn upsert_result(&self, result: CompetitionResult) -> AppResult<()> {
-        kv_upsert(&self.inner, RESULTS_TABLE, &result.id, &result)
+    pub async fn upsert_result(&self, result: CompetitionResult) -> AppResult<()> {
+        kv_upsert(&self.conn, "competition_results", &result.id, &result).await
     }
 
-    pub fn get_result(&self, id: &str) -> AppResult<Option<CompetitionResult>> {
-        kv_get(&self.inner, RESULTS_TABLE, id)
+    pub async fn get_result(&self, id: &str) -> AppResult<Option<CompetitionResult>> {
+        kv_get(&self.conn, "competition_results", id).await
     }
 
     // --- cms ---
 
-    pub fn list_cms_pages(&self) -> AppResult<Vec<CmsPage>> {
-        let mut pages: Vec<CmsPage> = kv_list(&self.inner, CMS_TABLE)?;
+    pub async fn list_cms_pages(&self) -> AppResult<Vec<CmsPage>> {
+        let mut pages: Vec<CmsPage> = kv_list(&self.conn, "cms_pages").await?;
         pages.sort_by(|a, b| a.slug.cmp(&b.slug));
         Ok(pages)
     }
 
-    pub fn upsert_cms_page(&self, page: CmsPage) -> AppResult<()> {
-        kv_upsert(&self.inner, CMS_TABLE, &page.id, &page)
+    pub async fn upsert_cms_page(&self, page: CmsPage) -> AppResult<()> {
+        kv_upsert(&self.conn, "cms_pages", &page.id, &page).await
     }
 
-    pub fn get_cms_page(&self, id: &str) -> AppResult<Option<CmsPage>> {
-        kv_get(&self.inner, CMS_TABLE, id)
+    pub async fn get_cms_page(&self, id: &str) -> AppResult<Option<CmsPage>> {
+        kv_get(&self.conn, "cms_pages", id).await
     }
 
-    pub fn delete_cms_page(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.inner, CMS_TABLE, id)
+    pub async fn delete_cms_page(&self, id: &str) -> AppResult<()> {
+        kv_delete(&self.conn, "cms_pages", id).await
     }
 
     // --- logs ---
 
-    pub fn list_logs(&self, limit: usize) -> AppResult<Vec<SystemLog>> {
-        let mut logs: Vec<SystemLog> = kv_list(&self.inner, LOGS_TABLE)?;
+    pub async fn list_logs(&self, limit: usize) -> AppResult<Vec<SystemLog>> {
+        let mut logs: Vec<SystemLog> = kv_list(&self.conn, "system_logs").await?;
         logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         logs.truncate(limit);
         Ok(logs)
     }
 
-    pub fn append_log(
+    pub async fn append_log(
         &self,
         level: LogLevel,
         source: &str,
@@ -498,19 +473,19 @@ impl Database {
             actor_id: actor_id.map(|s| s.to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        kv_upsert(&self.inner, LOGS_TABLE, &log.id, &log)
+        kv_upsert(&self.conn, "system_logs", &log.id, &log).await
     }
 
     // --- stats ---
 
-    pub fn site_stats(&self) -> AppResult<SiteStats> {
-        let users = self.list_users()?;
-        let results = self.list_results()?;
-        let pages = self.list_cms_pages()?;
+    pub async fn site_stats(&self) -> AppResult<SiteStats> {
+        let users = self.list_users().await?;
+        let results = self.list_results().await?;
+        let pages = self.list_cms_pages().await?;
         Ok(SiteStats {
             users: users.len(),
             active_users: users.iter().filter(|u| u.is_active).count(),
-            athlete_profiles: self.list_profiles()?.len(),
+            athlete_profiles: self.list_profiles().await?.len(),
             cms_pages: pages.len(),
             cms_published: pages
                 .iter()
@@ -521,33 +496,34 @@ impl Database {
                 .filter(|r| r.status == ResultStatus::Pending)
                 .count(),
             results_total: results.len(),
-            feature_flags: self.list_flags()?.len(),
-            system_logs: self.list_logs(10_000)?.len(),
+            feature_flags: self.list_flags().await?.len(),
+            system_logs: self.list_logs(10_000).await?.len(),
         })
     }
 
-    pub fn athlete_stats(&self, user_id: &str) -> AppResult<AthleteStats> {
-        let results = self.list_results()?;
+    pub async fn athlete_stats(&self, user_id: &str) -> AppResult<AthleteStats> {
+        let results = self.list_results().await?;
         let mine: Vec<_> = results
             .iter()
             .filter(|r| r.user_id.as_deref() == Some(user_id))
             .collect();
-        let attendance = self.list_attendance_in_window()?;
+        let attendance = self.list_attendance_in_window().await?;
         let mine_att: Vec<_> = attendance
             .iter()
             .filter(|a| a.user_id == user_id)
             .collect();
         let now = chrono::Utc::now();
         let month_prefix = now.format("%Y-%m").to_string();
-        let plans = self.plans_for_user(user_id)?;
-        let progress = self.list_plan_progress_for_user(user_id)?;
+        let plans = self.plans_for_user(user_id).await?;
+        let progress = self.list_plan_progress_for_user(user_id).await?;
         let completed = progress
             .iter()
             .flat_map(|p| p.entries.iter())
             .filter(|e| e.completed)
             .count();
         let profile = self
-            .list_profiles()?
+            .list_profiles()
+            .await?
             .into_iter()
             .find(|p| p.user_id == user_id);
 
@@ -575,22 +551,22 @@ impl Database {
 
     // --- attendance ---
 
-    pub fn get_attendance_session(&self) -> AppResult<Option<AttendanceSession>> {
-        kv_get(&self.inner, META_TABLE, "attendance_session")
+    pub async fn get_attendance_session(&self) -> AppResult<Option<AttendanceSession>> {
+        kv_get(&self.conn, "meta", "attendance_session").await
     }
 
-    pub fn set_attendance_session(&self, session: AttendanceSession) -> AppResult<()> {
+    pub async fn set_attendance_session(&self, session: AttendanceSession) -> AppResult<()> {
         let payload = serde_json::to_string(&session).map_err(internal)?;
-        self.upsert_meta("attendance_session", &payload)
+        self.upsert_meta("attendance_session", &payload).await
     }
 
-    pub fn list_attendance_raw(&self) -> AppResult<Vec<AttendanceRecord>> {
-        kv_list(&self.inner, ATTENDANCE_TABLE)
+    pub async fn list_attendance_raw(&self) -> AppResult<Vec<AttendanceRecord>> {
+        kv_list(&self.conn, "attendance").await
     }
 
-    pub fn list_attendance_in_window(&self) -> AppResult<Vec<AttendanceRecord>> {
+    pub async fn list_attendance_in_window(&self) -> AppResult<Vec<AttendanceRecord>> {
         let (start, end) = attendance_window_bounds();
-        let mut items = self.list_attendance_raw()?;
+        let mut items = self.list_attendance_raw().await?;
         items.retain(|r| {
             chrono::DateTime::parse_from_rfc3339(&r.checked_at)
                 .map(|dt| {
@@ -603,9 +579,9 @@ impl Database {
         Ok(items)
     }
 
-    pub fn prune_attendance_outside_window(&self) -> AppResult<()> {
+    pub async fn prune_attendance_outside_window(&self) -> AppResult<()> {
         let (start, end) = attendance_window_bounds();
-        let all = self.list_attendance_raw()?;
+        let all = self.list_attendance_raw().await?;
         for r in all {
             let keep = chrono::DateTime::parse_from_rfc3339(&r.checked_at)
                 .map(|dt| {
@@ -614,24 +590,25 @@ impl Database {
                 })
                 .unwrap_or(false);
             if !keep {
-                kv_delete(&self.inner, ATTENDANCE_TABLE, &r.id)?;
+                kv_delete(&self.conn, "attendance", &r.id).await?;
             }
         }
         Ok(())
     }
 
-    pub fn upsert_attendance(&self, record: AttendanceRecord) -> AppResult<()> {
-        kv_upsert(&self.inner, ATTENDANCE_TABLE, &record.id, &record)
+    pub async fn upsert_attendance(&self, record: AttendanceRecord) -> AppResult<()> {
+        kv_upsert(&self.conn, "attendance", &record.id, &record).await
     }
 
-    pub fn check_in_attendance(
+    pub async fn check_in_attendance(
         &self,
         user_id: &str,
         display_name: &str,
         token: &str,
     ) -> AppResult<AttendanceRecord> {
         let session = self
-            .get_attendance_session()?
+            .get_attendance_session()
+            .await?
             .ok_or_else(|| AppError::BadRequest("Brak aktywnej sesji obecności.".into()))?;
         if session.token != token {
             return Err(AppError::BadRequest(
@@ -640,9 +617,11 @@ impl Database {
         }
 
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let already = self.list_attendance_in_window()?.into_iter().any(|r| {
-            r.user_id == user_id && r.checked_at.starts_with(&today)
-        });
+        let already = self
+            .list_attendance_in_window()
+            .await?
+            .into_iter()
+            .any(|r| r.user_id == user_id && r.checked_at.starts_with(&today));
         if already {
             return Err(AppError::BadRequest(
                 "Obecność na dziś jest już zapisana.".into(),
@@ -656,34 +635,35 @@ impl Database {
             checked_at: chrono::Utc::now().to_rfc3339(),
             session_token: token.into(),
         };
-        self.upsert_attendance(record.clone())?;
-        self.prune_attendance_outside_window()?;
+        self.upsert_attendance(record.clone()).await?;
+        self.prune_attendance_outside_window().await?;
         Ok(record)
     }
 
     // --- training plans ---
 
-    pub fn list_plans(&self) -> AppResult<Vec<TrainingPlan>> {
-        let mut plans: Vec<TrainingPlan> = kv_list(&self.inner, PLANS_TABLE)?;
+    pub async fn list_plans(&self) -> AppResult<Vec<TrainingPlan>> {
+        let mut plans: Vec<TrainingPlan> = kv_list(&self.conn, "training_plans").await?;
         plans.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(plans)
     }
 
-    pub fn get_plan(&self, id: &str) -> AppResult<Option<TrainingPlan>> {
-        kv_get(&self.inner, PLANS_TABLE, id)
+    pub async fn get_plan(&self, id: &str) -> AppResult<Option<TrainingPlan>> {
+        kv_get(&self.conn, "training_plans", id).await
     }
 
-    pub fn upsert_plan(&self, plan: TrainingPlan) -> AppResult<()> {
-        kv_upsert(&self.inner, PLANS_TABLE, &plan.id, &plan)
+    pub async fn upsert_plan(&self, plan: TrainingPlan) -> AppResult<()> {
+        kv_upsert(&self.conn, "training_plans", &plan.id, &plan).await
     }
 
-    pub fn delete_plan(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.inner, PLANS_TABLE, id)
+    pub async fn delete_plan(&self, id: &str) -> AppResult<()> {
+        kv_delete(&self.conn, "training_plans", id).await
     }
 
-    pub fn plans_for_user(&self, user_id: &str) -> AppResult<Vec<TrainingPlan>> {
+    pub async fn plans_for_user(&self, user_id: &str) -> AppResult<Vec<TrainingPlan>> {
         Ok(self
-            .list_plans()?
+            .list_plans()
+            .await?
             .into_iter()
             .filter(|p| {
                 p.assigned_user_ids.is_empty() || p.assigned_user_ids.iter().any(|id| id == user_id)
@@ -691,35 +671,36 @@ impl Database {
             .collect())
     }
 
-    pub fn list_plan_progress(&self) -> AppResult<Vec<TrainingPlanProgress>> {
-        kv_list(&self.inner, PLAN_PROGRESS_TABLE)
+    pub async fn list_plan_progress(&self) -> AppResult<Vec<TrainingPlanProgress>> {
+        kv_list(&self.conn, "plan_progress").await
     }
 
-    pub fn list_plan_progress_for_user(
+    pub async fn list_plan_progress_for_user(
         &self,
         user_id: &str,
     ) -> AppResult<Vec<TrainingPlanProgress>> {
         Ok(self
-            .list_plan_progress()?
+            .list_plan_progress()
+            .await?
             .into_iter()
             .filter(|p| p.user_id == user_id)
             .collect())
     }
 
-    pub fn get_plan_progress(
+    pub async fn get_plan_progress(
         &self,
         plan_id: &str,
         user_id: &str,
     ) -> AppResult<Option<TrainingPlanProgress>> {
         let key = format!("{plan_id}:{user_id}");
-        kv_get(&self.inner, PLAN_PROGRESS_TABLE, &key)
+        kv_get(&self.conn, "plan_progress", &key).await
     }
 
-    pub fn upsert_plan_progress(&self, progress: TrainingPlanProgress) -> AppResult<()> {
+    pub async fn upsert_plan_progress(&self, progress: TrainingPlanProgress) -> AppResult<()> {
         let key = format!("{}:{}", progress.plan_id, progress.user_id);
         let mut p = progress;
         p.id = key.clone();
-        kv_upsert(&self.inner, PLAN_PROGRESS_TABLE, &key, &p)
+        kv_upsert(&self.conn, "plan_progress", &key, &p).await
     }
 
     // --- generic DB admin ---
@@ -728,10 +709,11 @@ impl Database {
         MANAGED_TABLES.to_vec()
     }
 
-    pub fn db_list_rows(&self, table: &str) -> AppResult<Vec<Value>> {
+    pub async fn db_list_rows(&self, table: &str) -> AppResult<Vec<Value>> {
         match table {
             "users" => Ok(self
-                .list_users()?
+                .list_users()
+                .await?
                 .into_iter()
                 .map(|u| {
                     serde_json::json!({
@@ -746,53 +728,53 @@ impl Database {
                     })
                 })
                 .collect()),
-            "athlete_profiles" => values_from_list(self.list_profiles()?),
-            "feature_flags" => values_from_list(self.list_flags()?),
-            "competition_results" => values_from_list(self.list_results()?),
-            "cms_pages" => values_from_list(self.list_cms_pages()?),
-            "system_logs" => values_from_list(self.list_logs(500)?),
-            "attendance" => values_from_list(self.list_attendance_raw()?),
-            "training_plans" => values_from_list(self.list_plans()?),
-            "plan_progress" => values_from_list(self.list_plan_progress()?),
-            "meta" => self.list_meta_raw(),
+            "athlete_profiles" => values_from_list(self.list_profiles().await?),
+            "feature_flags" => values_from_list(self.list_flags().await?),
+            "competition_results" => values_from_list(self.list_results().await?),
+            "cms_pages" => values_from_list(self.list_cms_pages().await?),
+            "system_logs" => values_from_list(self.list_logs(500).await?),
+            "attendance" => values_from_list(self.list_attendance_raw().await?),
+            "training_plans" => values_from_list(self.list_plans().await?),
+            "plan_progress" => values_from_list(self.list_plan_progress().await?),
+            "meta" => self.list_meta_raw().await,
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
         }
     }
 
-    pub fn db_upsert_row(&self, table: &str, row: Value) -> AppResult<()> {
+    pub async fn db_upsert_row(&self, table: &str, row: Value) -> AppResult<()> {
         match table {
             "athlete_profiles" => {
                 let profile: AthleteProfile = serde_json::from_value(row).map_err(|e| {
                     AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}"))
                 })?;
-                self.upsert_profile(profile)
+                self.upsert_profile(profile).await
             }
             "feature_flags" => {
                 let flag: FeatureFlag = serde_json::from_value(row).map_err(|e| {
                     AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}"))
                 })?;
-                self.upsert_flag(flag)
+                self.upsert_flag(flag).await
             }
             "competition_results" => {
                 let result: CompetitionResult = serde_json::from_value(row).map_err(|e| {
                     AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}"))
                 })?;
-                self.upsert_result(result)
+                self.upsert_result(result).await
             }
             "cms_pages" => {
                 let page: CmsPage = serde_json::from_value(row)
                     .map_err(|e| AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}")))?;
-                self.upsert_cms_page(page)
+                self.upsert_cms_page(page).await
             }
             "training_plans" => {
                 let plan: TrainingPlan = serde_json::from_value(row)
                     .map_err(|e| AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}")))?;
-                self.upsert_plan(plan)
+                self.upsert_plan(plan).await
             }
             "attendance" => {
                 let rec: AttendanceRecord = serde_json::from_value(row)
                     .map_err(|e| AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}")))?;
-                self.upsert_attendance(rec)
+                self.upsert_attendance(rec).await
             }
             "meta" => {
                 let key = row
@@ -804,7 +786,7 @@ impl Database {
                     .cloned()
                     .unwrap_or(Value::Null)
                     .to_string();
-                self.upsert_meta(key, &value)
+                self.upsert_meta(key, &value).await
             }
             "users" | "system_logs" | "plan_progress" => Err(AppError::Forbidden(
                 "Edycja tej tabeli tylko przez dedykowane API.".into(),
@@ -813,53 +795,91 @@ impl Database {
         }
     }
 
-    pub fn db_delete_row(&self, table: &str, id: &str) -> AppResult<()> {
+    pub async fn db_delete_row(&self, table: &str, id: &str) -> AppResult<()> {
         match table {
-            "athlete_profiles" => self.delete_profile(id),
-            "cms_pages" => self.delete_cms_page(id),
-            "feature_flags" => kv_delete(&self.inner, FLAGS_TABLE, id),
-            "competition_results" => kv_delete(&self.inner, RESULTS_TABLE, id),
-            "training_plans" => self.delete_plan(id),
-            "attendance" => kv_delete(&self.inner, ATTENDANCE_TABLE, id),
-            "meta" => self.delete_meta(id),
-            "users" => self.delete_user(id),
-            "system_logs" => kv_delete(&self.inner, LOGS_TABLE, id),
-            "plan_progress" => kv_delete(&self.inner, PLAN_PROGRESS_TABLE, id),
+            "athlete_profiles" => self.delete_profile(id).await,
+            "cms_pages" => self.delete_cms_page(id).await,
+            "feature_flags" => kv_delete(&self.conn, "feature_flags", id).await,
+            "competition_results" => kv_delete(&self.conn, "competition_results", id).await,
+            "training_plans" => self.delete_plan(id).await,
+            "attendance" => kv_delete(&self.conn, "attendance", id).await,
+            "meta" => self.delete_meta(id).await,
+            "users" => self.delete_user(id).await,
+            "system_logs" => kv_delete(&self.conn, "system_logs", id).await,
+            "plan_progress" => kv_delete(&self.conn, "plan_progress", id).await,
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
         }
     }
 
-    fn list_meta_raw(&self) -> AppResult<Vec<Value>> {
-        let read = self.inner.begin_read().map_err(internal)?;
-        let table = read.open_table(META_TABLE).map_err(internal)?;
+    async fn list_meta_raw(&self) -> AppResult<Vec<Value>> {
+        ensure_table("meta")?;
+        let mut rows_iter = self
+            .conn
+            .query("SELECT key, value FROM meta", ())
+            .await
+            .map_err(internal)?;
         let mut rows = Vec::new();
-        for entry in table.iter().map_err(internal)? {
-            let (k, v) = entry.map_err(internal)?;
-            rows.push(serde_json::json!({
-                "key": k.value(),
-                "value": v.value()
-            }));
+        while let Some(row) = rows_iter.next().await.map_err(internal)? {
+            let key: String = row.get(0).map_err(internal)?;
+            let value: String = row.get(1).map_err(internal)?;
+            rows.push(serde_json::json!({ "key": key, "value": value }));
         }
         Ok(rows)
     }
 
-    fn upsert_meta(&self, key: &str, value: &str) -> AppResult<()> {
-        let write = self.inner.begin_write().map_err(internal)?;
-        {
-            let mut table = write.open_table(META_TABLE).map_err(internal)?;
-            table.insert(key, value).map_err(internal)?;
+    async fn upsert_meta(&self, key: &str, value: &str) -> AppResult<()> {
+        self.kv_upsert_raw("meta", key, value).await
+    }
+
+    async fn delete_meta(&self, key: &str) -> AppResult<()> {
+        self.kv_delete_raw("meta", key).await
+    }
+
+    async fn kv_get_raw(&self, table: &str, key: &str) -> AppResult<Option<String>> {
+        ensure_table(table)?;
+        let sql = format!("SELECT value FROM {table} WHERE key = ?1");
+        let mut rows = self
+            .conn
+            .query(&sql, params![key])
+            .await
+            .map_err(internal)?;
+        match rows.next().await.map_err(internal)? {
+            Some(row) => Ok(Some(row.get::<String>(0).map_err(internal)?)),
+            None => Ok(None),
         }
-        write.commit().map_err(internal)?;
+    }
+
+    async fn kv_list_raw(&self, table: &str) -> AppResult<Vec<String>> {
+        ensure_table(table)?;
+        let sql = format!("SELECT value FROM {table}");
+        let mut rows = self.conn.query(&sql, ()).await.map_err(internal)?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(internal)? {
+            items.push(row.get::<String>(0).map_err(internal)?);
+        }
+        Ok(items)
+    }
+
+    async fn kv_upsert_raw(&self, table: &str, key: &str, value: &str) -> AppResult<()> {
+        ensure_table(table)?;
+        let sql = format!(
+            "INSERT INTO {table} (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        );
+        self.conn
+            .execute(&sql, params![key, value])
+            .await
+            .map_err(internal)?;
         Ok(())
     }
 
-    fn delete_meta(&self, key: &str) -> AppResult<()> {
-        let write = self.inner.begin_write().map_err(internal)?;
-        {
-            let mut table = write.open_table(META_TABLE).map_err(internal)?;
-            table.remove(key).map_err(internal)?;
-        }
-        write.commit().map_err(internal)?;
+    async fn kv_delete_raw(&self, table: &str, key: &str) -> AppResult<()> {
+        ensure_table(table)?;
+        let sql = format!("DELETE FROM {table} WHERE key = ?1");
+        self.conn
+            .execute(&sql, params![key])
+            .await
+            .map_err(internal)?;
         Ok(())
     }
 }
@@ -871,62 +891,70 @@ fn values_from_list<T: Serialize>(items: Vec<T>) -> AppResult<Vec<Value>> {
         .collect()
 }
 
-fn kv_list<T: for<'de> Deserialize<'de>>(
-    db: &Arc<RedbDatabase>,
-    table_def: TableDefinition<&str, &str>,
+fn ensure_table(table: &str) -> AppResult<()> {
+    if MANAGED_TABLES.contains(&table) {
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!("Nieznana tabela: {table}")))
+    }
+}
+
+async fn kv_list<T: for<'de> Deserialize<'de>>(
+    conn: &Connection,
+    table: &str,
 ) -> AppResult<Vec<T>> {
-    let read = db.begin_read().map_err(internal)?;
-    let table = read.open_table(table_def).map_err(internal)?;
+    ensure_table(table)?;
+    let sql = format!("SELECT value FROM {table}");
+    let mut rows = conn.query(&sql, ()).await.map_err(internal)?;
     let mut items = Vec::new();
-    for entry in table.iter().map_err(internal)? {
-        let (_, value) = entry.map_err(internal)?;
-        items.push(serde_json::from_str(value.value()).map_err(internal)?);
+    while let Some(row) = rows.next().await.map_err(internal)? {
+        let value: String = row.get(0).map_err(internal)?;
+        items.push(serde_json::from_str(&value).map_err(internal)?);
     }
     Ok(items)
 }
 
-fn kv_get<T: for<'de> Deserialize<'de>>(
-    db: &Arc<RedbDatabase>,
-    table_def: TableDefinition<&str, &str>,
+async fn kv_get<T: for<'de> Deserialize<'de>>(
+    conn: &Connection,
+    table: &str,
     key: &str,
 ) -> AppResult<Option<T>> {
-    let read = db.begin_read().map_err(internal)?;
-    let table = read.open_table(table_def).map_err(internal)?;
-    match table.get(key).map_err(internal)? {
-        Some(access) => Ok(Some(
-            serde_json::from_str(access.value()).map_err(internal)?,
-        )),
+    ensure_table(table)?;
+    let sql = format!("SELECT value FROM {table} WHERE key = ?1");
+    let mut rows = conn.query(&sql, params![key]).await.map_err(internal)?;
+    match rows.next().await.map_err(internal)? {
+        Some(row) => {
+            let value: String = row.get(0).map_err(internal)?;
+            Ok(Some(serde_json::from_str(&value).map_err(internal)?))
+        }
         None => Ok(None),
     }
 }
 
-fn kv_upsert<T: Serialize>(
-    db: &Arc<RedbDatabase>,
-    table_def: TableDefinition<&str, &str>,
+async fn kv_upsert<T: Serialize>(
+    conn: &Connection,
+    table: &str,
     key: &str,
     value: &T,
 ) -> AppResult<()> {
+    ensure_table(table)?;
     let payload = serde_json::to_string(value).map_err(internal)?;
-    let write = db.begin_write().map_err(internal)?;
-    {
-        let mut table = write.open_table(table_def).map_err(internal)?;
-        table.insert(key, payload.as_str()).map_err(internal)?;
-    }
-    write.commit().map_err(internal)?;
+    let sql = format!(
+        "INSERT INTO {table} (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    );
+    conn.execute(&sql, params![key, payload])
+        .await
+        .map_err(internal)?;
     Ok(())
 }
 
-fn kv_delete(
-    db: &Arc<RedbDatabase>,
-    table_def: TableDefinition<&str, &str>,
-    key: &str,
-) -> AppResult<()> {
-    let write = db.begin_write().map_err(internal)?;
-    {
-        let mut table = write.open_table(table_def).map_err(internal)?;
-        table.remove(key).map_err(internal)?;
-    }
-    write.commit().map_err(internal)?;
+async fn kv_delete(conn: &Connection, table: &str, key: &str) -> AppResult<()> {
+    ensure_table(table)?;
+    let sql = format!("DELETE FROM {table} WHERE key = ?1");
+    conn.execute(&sql, params![key])
+        .await
+        .map_err(internal)?;
     Ok(())
 }
 
@@ -934,7 +962,6 @@ fn attendance_window_bounds() -> (chrono::DateTime<chrono::Utc>, chrono::DateTim
     use chrono::{Datelike, Duration, TimeZone, Utc};
     let now = Utc::now();
     let year = now.year();
-    // Aktualny rok ± 2 miesiące
     let year_start = Utc
         .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
         .single()
@@ -953,16 +980,12 @@ fn local_db_path(config: &Config) -> PathBuf {
         .database_url
         .strip_prefix("file:")
         .unwrap_or(&config.database_url);
-
     let path = Path::new(raw);
-    if config.is_remote_db() {
-        return PathBuf::from("./data/slavia.redb");
-    }
-
-    if path.extension().is_some_and(|ext| {
-        ext.eq_ignore_ascii_case("db") || ext.eq_ignore_ascii_case("sqlite")
-    }) {
-        path.with_extension("redb")
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("redb"))
+    {
+        path.with_extension("db")
     } else {
         path.to_path_buf()
     }

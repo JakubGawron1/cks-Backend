@@ -37,7 +37,7 @@ pub async fn list_results(
     let mine = query.mine.unwrap_or(false);
     if mine {
         ensure_roles(&auth, &[Role::Zawodnik, Role::Trener, Role::Admin])?;
-        let all = state.db.list_results()?;
+        let all = state.db.list_results().await?;
         let filtered = all
             .into_iter()
             .filter(|r| r.user_id.as_deref() == Some(auth.user.id.as_str()))
@@ -45,7 +45,7 @@ pub async fn list_results(
         return Ok(Json(filtered));
     }
     ensure_roles(&auth, &[Role::Trener, Role::Admin])?;
-    Ok(Json(state.db.list_results()?))
+    Ok(Json(state.db.list_results().await?))
 }
 
 pub async fn create_result(
@@ -91,7 +91,7 @@ pub async fn create_result(
         submitted_at: now.clone(),
         updated_at: now,
     };
-    state.db.upsert_result(result.clone())?;
+    state.db.upsert_result(result.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "results",
@@ -100,7 +100,7 @@ pub async fn create_result(
             result.event_name, result.kind, auth.user.email
         ),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(result))
 }
 
@@ -114,18 +114,18 @@ pub async fn update_result(
 
     let mut result = state
         .db
-        .get_result(&id)?
+        .get_result(&id).await?
         .ok_or_else(|| AppError::NotFound("Wynik nie istnieje.".into()))?;
 
     result.status = body.status;
     result.reviewer_note = body.reviewer_note;
     result.updated_at = chrono::Utc::now().to_rfc3339();
-    state.db.upsert_result(result.clone())?;
+    state.db.upsert_result(result.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "results",
         &format!("Weryfikacja wyniku {id} → {:?}", result.status),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(result))
 }

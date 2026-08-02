@@ -4,8 +4,24 @@ use axum::http::{HeaderValue, Method};
 use thiserror::Error;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductionMode {
+    Dev,
+    Production,
+}
+
+impl ProductionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Production => "production",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub production_mode: ProductionMode,
     pub database_url: String,
     pub turso_auth_token: Option<String>,
     pub jwt_secret: String,
@@ -36,16 +52,30 @@ impl Config {
         std::env::var("SPACE_ID").is_ok()
     }
 
-    /// Hosting produkcyjny (Render lub HF Space) — wymagane sekrety.
+    /// Hosting produkcyjny (Render lub HF Space).
     pub fn is_hosted() -> bool {
         Self::is_render() || Self::is_huggingface()
     }
 
-    fn frontend_origins_from_env(hosted: bool) -> Result<Vec<String>, ConfigError> {
-        let raw = std::env::var("FRONTEND_ORIGIN")
-            .or_else(|_| std::env::var("CORS_ALLOWED_ORIGINS"));
+    fn production_mode_from_env() -> Result<ProductionMode, ConfigError> {
+        match std::env::var("PRODUCTION_MODE") {
+            Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "dev" => Ok(ProductionMode::Dev),
+                "production" => Ok(ProductionMode::Production),
+                other => Err(ConfigError::Invalid(format!(
+                    "PRODUCTION_MODE musi być 'dev' lub 'production' (otrzymano: {other})"
+                ))),
+            },
+            // Na hostingu domyślnie production; lokalnie dev.
+            Err(_) if Self::is_hosted() => Ok(ProductionMode::Production),
+            Err(_) => Ok(ProductionMode::Dev),
+        }
+    }
 
-        let raw = if hosted {
+    fn frontend_origins_from_env(strict: bool) -> Result<Vec<String>, ConfigError> {
+        let raw = std::env::var("FRONTEND_ORIGIN").or_else(|_| std::env::var("CORS_ALLOWED_ORIGINS"));
+
+        let raw = if strict {
             raw.map_err(|_| ConfigError::Missing("FRONTEND_ORIGIN"))?
         } else {
             raw.unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string())
@@ -64,20 +94,40 @@ impl Config {
     }
 
     pub fn from_env() -> Result<Self, ConfigError> {
-        let hosted = Self::is_hosted();
+        let production_mode = Self::production_mode_from_env()?;
+        let strict = production_mode == ProductionMode::Production || Self::is_hosted();
 
         let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "file:./data/slavia.redb".to_string());
+            .or_else(|_| std::env::var("TURSO_DATABASE_URL"))
+            .unwrap_or_else(|_| match production_mode {
+                ProductionMode::Dev => "file:./data/slavia.db".to_string(),
+                ProductionMode::Production => String::new(),
+            });
 
-        let turso_auth_token = std::env::var("TURSO_AUTH_TOKEN").ok().filter(|v| !v.is_empty());
+        if production_mode == ProductionMode::Production && database_url.is_empty() {
+            return Err(ConfigError::Missing("DATABASE_URL"));
+        }
 
-        if (database_url.starts_with("libsql://") || database_url.starts_with("https://"))
-            && turso_auth_token.is_none()
-        {
+        let turso_auth_token = std::env::var("TURSO_AUTH_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty());
+
+        let remote = is_remote_url(&database_url);
+
+        if production_mode == ProductionMode::Production {
+            if !remote {
+                return Err(ConfigError::Invalid(
+                    "PRODUCTION_MODE=production wymaga DATABASE_URL=libsql://… (Turso)".into(),
+                ));
+            }
+            if turso_auth_token.is_none() {
+                return Err(ConfigError::Missing("TURSO_AUTH_TOKEN"));
+            }
+        } else if remote && turso_auth_token.is_none() {
             return Err(ConfigError::Missing("TURSO_AUTH_TOKEN"));
         }
 
-        let jwt_secret = if hosted {
+        let jwt_secret = if strict {
             std::env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?
         } else {
             std::env::var("JWT_SECRET").unwrap_or_else(|_| {
@@ -106,12 +156,12 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
 
-        let frontend_origins = Self::frontend_origins_from_env(hosted)?;
+        let frontend_origins = Self::frontend_origins_from_env(strict)?;
 
         let seed_superadmin_email = std::env::var("SEED_SUPERADMIN_EMAIL")
             .or_else(|_| std::env::var("SEED_ADMIN_EMAIL"))
             .unwrap_or_else(|_| "superadmin@cks-slavia.local".to_string());
-        let seed_superadmin_password = if hosted {
+        let seed_superadmin_password = if strict {
             std::env::var("SEED_SUPERADMIN_PASSWORD")
                 .or_else(|_| std::env::var("SEED_ADMIN_PASSWORD"))
                 .map_err(|_| ConfigError::Missing("SEED_SUPERADMIN_PASSWORD"))?
@@ -121,13 +171,14 @@ impl Config {
                 .unwrap_or_else(|_| "superadmin123!".to_string())
         };
 
-        if hosted && seed_superadmin_password == "superadmin123!" {
+        if strict && seed_superadmin_password == "superadmin123!" {
             return Err(ConfigError::Invalid(
                 "SEED_SUPERADMIN_PASSWORD: ustaw własne hasło (nie domyślne)".into(),
             ));
         }
 
         Ok(Self {
+            production_mode,
             database_url,
             turso_auth_token,
             jwt_secret,
@@ -141,8 +192,7 @@ impl Config {
     }
 
     pub fn is_remote_db(&self) -> bool {
-        self.database_url.starts_with("libsql://")
-            || self.database_url.starts_with("https://")
+        is_remote_url(&self.database_url)
     }
 
     pub fn cors_layer(&self) -> Result<CorsLayer, ConfigError> {
@@ -171,4 +221,8 @@ impl Config {
                 axum::http::header::ACCEPT,
             ]))
     }
+}
+
+fn is_remote_url(url: &str) -> bool {
+    url.starts_with("libsql://") || url.starts_with("https://")
 }

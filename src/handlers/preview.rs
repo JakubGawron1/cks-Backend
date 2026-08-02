@@ -35,7 +35,7 @@ pub async fn preview_start(
             auth.user.email, target.email
         ),
         Some(&auth.user.id),
-    )?;
+    ).await?;
 
     Ok(Json(PublicUser::from(&target)))
 }
@@ -50,6 +50,6 @@ pub async fn preview_stop(
         "preview",
         &format!("Superadmin {} zakończył podgląd", auth.user.email),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

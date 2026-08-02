@@ -42,6 +42,9 @@ Space: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)
 
 | Klucz | Wymagane | Opis |
 |-------|----------|------|
+| `PRODUCTION_MODE` | tak | `production` |
+| `DATABASE_URL` | tak | `libsql://YOUR-DB.turso.io` (alias: `TURSO_DATABASE_URL`) |
+| `TURSO_AUTH_TOKEN` | tak | Token z Turso Dashboard |
 | `JWT_SECRET` | tak | Min. 16 znaków (lepiej 32+) |
 | `FRONTEND_ORIGIN` | tak* | `https://slavia.vercel.app` (+ opcjonalnie localhost) |
 | `SEED_SUPERADMIN_PASSWORD` | tak | Silne hasło (nie `superadmin123!`) |
@@ -53,6 +56,9 @@ Space: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)
 Przykład:
 
 ```text
+PRODUCTION_MODE=production
+DATABASE_URL=libsql://slavia-xxx.turso.io
+TURSO_AUTH_TOKEN=…
 FRONTEND_ORIGIN=https://slavia.vercel.app,http://localhost:3000
 ```
 
@@ -82,9 +88,12 @@ curl https://koliber-cks-slavia.hf.space/api/health
 
 Pełna instrukcja: [deploy.md](./deploy.md).
 
-## Uwaga: baza na Space
+## Baza danych
 
-`DATABASE_URL=file:/app/data/slavia.redb` — dysk Space jest **efemeryczny**. Po restarcie/rebuild dane mogą zniknąć (seed od nowa).
+| Tryb | Env | Baza |
+|------|-----|------|
+| **Dev** | `PRODUCTION_MODE=dev` | lokalny plik `file:./data/slavia.db` (libSQL/SQLite) |
+| **Production** | `PRODUCTION_MODE=production` | **Turso** (`libsql://…` + `TURSO_AUTH_TOKEN`) |
 
 ## Endpointy
 

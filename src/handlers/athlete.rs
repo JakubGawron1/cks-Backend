@@ -12,5 +12,5 @@ pub async fn athlete_stats(
     auth: AuthUser,
 ) -> AppResult<Json<AthleteStats>> {
     ensure_roles(&auth, &[Role::Zawodnik, Role::Trener, Role::Admin])?;
-    Ok(Json(state.db.athlete_stats(&auth.user.id)?))
+    Ok(Json(state.db.athlete_stats(&auth.user.id).await?))
 }

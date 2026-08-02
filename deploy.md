@@ -4,8 +4,8 @@
 
 | Środowisko | Jak |
 |------------|-----|
-| **Dev** | wyłącznie `cargo run` |
-| **Hosting** | Docker — **Hugging Face Space** lub Render Free |
+| **Dev** | wyłącznie `cargo run` (`PRODUCTION_MODE=dev`, lokalny plik SQLite) |
+| **Hosting** | Docker — **Hugging Face Space** lub Render Free + **Turso** |
 
 Aktualny produkcyjny target: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)  
 URL API: `https://koliber-cks-slavia.hf.space`
@@ -23,7 +23,7 @@ URL API: `https://koliber-cks-slavia.hf.space`
 | `GET /api/health` | healthcheck |
 | `GET /` | strona index → link do Vercel |
 
-Na Space (`SPACE_ID` ustawione) wymagane: `JWT_SECRET`, `FRONTEND_ORIGIN` (lub `CORS_ALLOWED_ORIGINS`), `SEED_SUPERADMIN_PASSWORD` (nie domyślne).
+Na Space wymagane: `PRODUCTION_MODE=production`, `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `JWT_SECRET`, `FRONTEND_ORIGIN` (lub `CORS_ALLOWED_ORIGINS`), `SEED_SUPERADMIN_PASSWORD` (nie domyślne).
 
 ### 1. Secrets w Space
 
@@ -31,12 +31,21 @@ Na Space (`SPACE_ID` ustawione) wymagane: `JWT_SECRET`, `FRONTEND_ORIGIN` (lub `
 
 | Zmienna | Przykład |
 |---------|----------|
+| `PRODUCTION_MODE` | `production` |
+| `DATABASE_URL` | `libsql://YOUR-DB-NAME-ORG.turso.io` |
+| `TURSO_AUTH_TOKEN` | token z Turso Dashboard |
 | `JWT_SECRET` | `openssl rand -hex 32` |
 | `FRONTEND_ORIGIN` | `https://slavia.vercel.app,http://localhost:3000` |
 | `SEED_SUPERADMIN_EMAIL` | Twój email |
 | `SEED_SUPERADMIN_PASSWORD` | silne hasło |
 
-Usuń / zignoruj stare klucze starego monorepo (`TURSO_*`, `GROQ_*`, itd.), jeśli nie są używane.
+Alias URL: `TURSO_DATABASE_URL` (jeśli ustawisz zamiast `DATABASE_URL`).
+
+### Turso — szybki start
+
+1. Utwórz bazę w [Turso](https://turso.tech/) (`turso db create slavia` lub Dashboard).
+2. Skopiuj URL (`libsql://…`) i auth token.
+3. Wklej jako secrets Space (powyżej).
 
 ### 2. Zastąpienie starego kodu (force push)
 
@@ -69,7 +78,7 @@ NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
 
 ### Baza na Space
 
-Dysk efemeryczny — `file:/app/data/slavia.redb` może znikać po restarcie. Seed utworzy superadmina od nowa.
+Trwałe dane: **Turso**. Lokalny plik w kontenerze nie jest używany przy `PRODUCTION_MODE=production`.
 
 ---
 
@@ -77,13 +86,13 @@ Dysk efemeryczny — `file:/app/data/slavia.redb` może znikać po restarcie. Se
 
 Szczegóły poniżej — ten sam `Dockerfile`, `render.yaml`.
 
-Backend czyta `PORT`. Na Renderze (`RENDER=true`) te same wymagane sekrety co na HF.
+Backend czyta `PORT`. Na Renderze te same wymagane sekrety co na HF (w tym Turso).
 
 ### Blueprint
 
 1. [dashboard.render.com](https://dashboard.render.com) → **New** → **Blueprint**
 2. Podłącz repo → `render.yaml`
-3. Ustaw `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_*`
+3. Ustaw `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_*`
 
 ### Ręcznie
 
@@ -93,7 +102,7 @@ Backend czyta `PORT`. Na Renderze (`RENDER=true`) te same wymagane sekrety co na
 
 ## Checklist (HF)
 
-- [ ] Secrets: `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD`
+- [ ] Secrets: `PRODUCTION_MODE=production`, `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD`
 - [ ] Force push obecnego `main` na Space
 - [ ] `curl …/api/health` → ok
 - [ ] Vercel: `NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space` + redeploy
@@ -105,19 +114,20 @@ Backend czyta `PORT`. Na Renderze (`RENDER=true`) te same wymagane sekrety co na
 
 | Objaw | Co zrobić |
 |-------|-----------|
-| Crash przy starcie: brak env | Ustaw secrets w Space Settings |
+| Crash przy starcie: brak env | Ustaw secrets w Space Settings (w tym Turso) |
 | Build OOM / timeout | Redeploy; `CARGO_BUILD_JOBS=2` już w Dockerfile |
 | CORS / Failed to fetch | `FRONTEND_ORIGIN=https://slavia.vercel.app` + poprawne `NEXT_PUBLIC_API_URL` |
 | Stary kod na Space | `git push hf main --force` z tego repo |
-| Utrata danych | Efemeryczny dysk — oczekiwane przy redb |
+| Błąd Turso / auth | Sprawdź `DATABASE_URL` (`libsql://`) i `TURSO_AUTH_TOKEN` |
 
 ---
 
 ## Skrót HF
 
 ```text
-1. Secrets w Space (JWT, FRONTEND_ORIGIN, SEED password)
-2. hf auth login && git push hf main --force
-3. curl https://koliber-cks-slavia.hf.space/api/health
-4. Vercel: NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
+1. Turso: DATABASE_URL + TURSO_AUTH_TOKEN
+2. Secrets: PRODUCTION_MODE=production, JWT, FRONTEND_ORIGIN, SEED password
+3. hf auth login && git push hf main --force
+4. curl https://koliber-cks-slavia.hf.space/api/health
+5. Vercel: NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
 ```

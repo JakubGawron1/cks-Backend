@@ -12,5 +12,5 @@ pub async fn site_stats(
     auth: AuthUser,
 ) -> AppResult<Json<SiteStats>> {
     ensure_roles(&auth, &[Role::Superadmin])?;
-    Ok(Json(state.db.site_stats()?))
+    Ok(Json(state.db.site_stats().await?))
 }

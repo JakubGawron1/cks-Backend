@@ -28,7 +28,7 @@ pub async fn db_list_rows(
     Path(table): Path<String>,
 ) -> AppResult<Json<Vec<Value>>> {
     ensure_roles(&auth, &[Role::Superadmin])?;
-    Ok(Json(state.db.db_list_rows(&table)?))
+    Ok(Json(state.db.db_list_rows(&table).await?))
 }
 
 pub async fn db_upsert_row(
@@ -38,13 +38,13 @@ pub async fn db_upsert_row(
     Json(body): Json<UpsertRowBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     ensure_roles(&auth, &[Role::Superadmin])?;
-    state.db.db_upsert_row(&table, body.row)?;
+    state.db.db_upsert_row(&table, body.row).await?;
     state.db.append_log(
         LogLevel::Warn,
         "db_admin",
         &format!("Upsert w tabeli {table}"),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -54,12 +54,12 @@ pub async fn db_delete_row(
     Path((table, id)): Path<(String, String)>,
 ) -> AppResult<Json<serde_json::Value>> {
     ensure_roles(&auth, &[Role::Superadmin])?;
-    state.db.db_delete_row(&table, &id)?;
+    state.db.db_delete_row(&table, &id).await?;
     state.db.append_log(
         LogLevel::Warn,
         "db_admin",
         &format!("Delete {id} z tabeli {table}"),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

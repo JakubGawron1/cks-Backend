@@ -18,7 +18,7 @@ pub async fn list_flags(
     auth: AuthUser,
 ) -> AppResult<Json<Vec<FeatureFlag>>> {
     ensure_roles(&auth, &[Role::Superadmin])?;
-    Ok(Json(state.db.list_flags()?))
+    Ok(Json(state.db.list_flags().await?))
 }
 
 pub async fn update_flag(
@@ -29,7 +29,7 @@ pub async fn update_flag(
 ) -> AppResult<Json<FeatureFlag>> {
     ensure_roles(&auth, &[Role::Superadmin])?;
 
-    let mut flags = state.db.list_flags()?;
+    let mut flags = state.db.list_flags().await?;
     let flag = flags
         .iter_mut()
         .find(|f| f.key == key)
@@ -38,7 +38,7 @@ pub async fn update_flag(
     flag.enabled = body.enabled;
     flag.updated_at = chrono::Utc::now().to_rfc3339();
     let updated = flag.clone();
-    state.db.upsert_flag(updated.clone())?;
+    state.db.upsert_flag(updated.clone()).await?;
     state.db.append_log(
         LogLevel::Info,
         "flags",
@@ -48,6 +48,6 @@ pub async fn update_flag(
             if updated.enabled { "on" } else { "off" }
         ),
         Some(&auth.user.id),
-    )?;
+    ).await?;
     Ok(Json(updated))
 }
