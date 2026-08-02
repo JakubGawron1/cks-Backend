@@ -1,3 +1,4 @@
+use axum::extract::State;
 use axum::response::Html;
 use axum::routing::get;
 use axum::Json;
@@ -7,8 +8,10 @@ use utoipa_axum::routes;
 use utoipa_scalar::{Scalar, Servable as ScalarServable};
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::error::AppResult;
 use crate::handlers;
 use crate::models::club::HealthResponse;
+use crate::models::user::ErrorBody;
 use crate::openapi::ApiDoc;
 use crate::state::AppState;
 
@@ -78,16 +81,18 @@ async fn index() -> Html<&'static str> {
     get,
     path = "/api/health",
     responses(
-        (status = 200, description = "OK", body = HealthResponse)
+        (status = 200, description = "OK", body = HealthResponse),
+        (status = 500, description = "Baza niedostępna", body = ErrorBody),
     ),
     tag = "admin"
 )]
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
+async fn health(State(state): State<AppState>) -> AppResult<Json<HealthResponse>> {
+    state.db.ping().await?;
+    Ok(Json(HealthResponse {
         status: "ok".into(),
         service: "slavia-backend".into(),
         auth: true,
-    })
+    }))
 }
 
 /// Buduje router API + pełny dokument OpenAPI (ścieżki z handlerów).

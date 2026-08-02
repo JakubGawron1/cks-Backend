@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use libsql::{params, Builder, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 use crate::auth::password::{hash_password, verify_password};
 use crate::config::Config;
@@ -92,12 +94,41 @@ fn normalize_optional_url(raw: Option<String>) -> Option<String> {
 
 #[derive(Clone)]
 pub struct Database {
+    inner: Arc<Mutex<DbInner>>,
+}
+
+struct DbInner {
     conn: Connection,
+    /// Gdy Some — baza remote (Turso); umożliwia odświeżenie streamu Hrana.
+    remote: Option<RemoteDb>,
+}
+
+#[derive(Clone)]
+struct RemoteDb {
+    url: String,
+    token: String,
+}
+
+fn is_stale_hrana_error(err: &dyn std::fmt::Display) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    s.contains("stream not found")
+        || s.contains("stream has expired")
+        || s.contains("stream_expired")
+        || s.contains("hrana_closed")
+        || s.contains("baton invalid")
+        || s.contains("baton reused")
+}
+
+fn is_stale_app_error(err: &AppError) -> bool {
+    match err {
+        AppError::Internal(inner) => is_stale_hrana_error(inner),
+        _ => false,
+    }
 }
 
 impl Database {
     pub async fn connect(config: &Config) -> Result<Self, AppError> {
-        let db = if config.is_remote_db() {
+        let (conn, remote) = if config.is_remote_db() {
             let token = config
                 .turso_auth_token
                 .clone()
@@ -106,10 +137,16 @@ impl Database {
                 "Łączenie z Turso ({})",
                 config.production_mode.as_str()
             );
-            Builder::new_remote(config.database_url.clone(), token)
+            let remote = RemoteDb {
+                url: config.database_url.clone(),
+                token: token.clone(),
+            };
+            let db = Builder::new_remote(remote.url.clone(), remote.token.clone())
                 .build()
                 .await
-                .map_err(internal)?
+                .map_err(internal)?;
+            let conn = db.connect().map_err(internal)?;
+            (conn, Some(remote))
         } else {
             let path = local_db_path(config);
             if let Some(parent) = path.parent() {
@@ -120,14 +157,69 @@ impl Database {
                 path.display(),
                 config.production_mode.as_str()
             );
-            Builder::new_local(path.to_string_lossy().as_ref())
+            let db = Builder::new_local(path.to_string_lossy().as_ref())
                 .build()
                 .await
-                .map_err(internal)?
+                .map_err(internal)?;
+            let conn = db.connect().map_err(internal)?;
+            (conn, None)
         };
 
-        let conn = db.connect().map_err(internal)?;
-        Ok(Self { conn })
+        Ok(Self {
+            inner: Arc::new(Mutex::new(DbInner { conn, remote })),
+        })
+    }
+
+    async fn has_remote(&self) -> bool {
+        self.inner.lock().await.remote.is_some()
+    }
+
+    async fn reconnect(&self) -> AppResult<()> {
+        let mut inner = self.inner.lock().await;
+        let Some(remote) = inner.remote.clone() else {
+            return Ok(());
+        };
+        tracing::warn!("Turso/Hrana: odświeżam połączenie (wygasły stream)");
+        let db = Builder::new_remote(remote.url, remote.token)
+            .build()
+            .await
+            .map_err(internal)?;
+        inner.conn = db.connect().map_err(internal)?;
+        tracing::info!("Turso/Hrana: ponowne połączenie OK");
+        Ok(())
+    }
+
+    /// Wykonaj operację na Connection; przy wygasłym streamie Hrana — reconnect + 1 retry.
+    async fn db_op<T, F, Fut>(&self, op: F) -> AppResult<T>
+    where
+        F: Fn(Connection) -> Fut,
+        Fut: std::future::Future<Output = AppResult<T>>,
+    {
+        for attempt in 0..2u8 {
+            let conn = self.inner.lock().await.conn.clone();
+            match op(conn).await {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if attempt == 0 && is_stale_app_error(&err) && self.has_remote().await =>
+                {
+                    tracing::warn!(error = %err, "Turso stream nieaktualny — retry po reconnect");
+                    self.reconnect().await?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(internal(
+            "Baza: ponowne połączenie nie przywróciło dostępu (Hrana).",
+        ))
+    }
+
+    /// Lekki ping bazy (health / readiness).
+    pub async fn ping(&self) -> AppResult<()> {
+        self.db_op(|conn| async move {
+            conn.execute("SELECT 1", ()).await.map_err(internal)?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn migrate(&self) -> AppResult<()> {
@@ -139,7 +231,15 @@ impl Database {
                     value TEXT NOT NULL
                 )"
             );
-            self.conn.execute(&sql, ()).await.map_err(internal)?;
+            let sql_clone = sql.clone();
+            self.db_op(|conn| {
+                let sql = sql_clone.clone();
+                async move {
+                    conn.execute(&sql, ()).await.map_err(internal)?;
+                    Ok(())
+                }
+            })
+            .await?;
         }
         tracing::info!(tables = MANAGED_TABLES.len(), "migracje OK");
         Ok(())
@@ -393,19 +493,19 @@ impl Database {
     // --- profiles ---
 
     pub async fn list_profiles(&self) -> AppResult<Vec<AthleteProfile>> {
-        kv_list(&self.conn, "athlete_profiles").await
+        self.kv_list( "athlete_profiles").await
     }
 
     pub async fn upsert_profile(&self, profile: AthleteProfile) -> AppResult<()> {
-        kv_upsert(&self.conn, "athlete_profiles", &profile.id, &profile).await
+        self.kv_upsert( "athlete_profiles", &profile.id, &profile).await
     }
 
     pub async fn delete_profile(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.conn, "athlete_profiles", id).await
+        self.kv_delete( "athlete_profiles", id).await
     }
 
     pub async fn get_profile(&self, id: &str) -> AppResult<Option<AthleteProfile>> {
-        kv_get(&self.conn, "athlete_profiles", id).await
+        self.kv_get( "athlete_profiles", id).await
     }
 
     pub async fn find_profile_by_user_id(
@@ -540,7 +640,7 @@ impl Database {
     }
 
     pub async fn list_flags(&self) -> AppResult<Vec<FeatureFlag>> {
-        let mut flags: Vec<FeatureFlag> = kv_list(&self.conn, "feature_flags").await?;
+        let mut flags: Vec<FeatureFlag> = self.kv_list( "feature_flags").await?;
         // Stable najpierw, potem Experimental; wewnątrz kategorii alfabetycznie.
         flags.sort_by(|a, b| match (&a.kind, &b.kind) {
             (FlagKind::Stable, FlagKind::Experimental) => std::cmp::Ordering::Less,
@@ -551,63 +651,63 @@ impl Database {
     }
 
     pub async fn upsert_flag(&self, flag: FeatureFlag) -> AppResult<()> {
-        kv_upsert(&self.conn, "feature_flags", &flag.key, &flag).await
+        self.kv_upsert( "feature_flags", &flag.key, &flag).await
     }
 
     // --- results ---
 
     pub async fn list_results(&self) -> AppResult<Vec<CompetitionResult>> {
-        let mut items: Vec<CompetitionResult> = kv_list(&self.conn, "competition_results").await?;
+        let mut items: Vec<CompetitionResult> = self.kv_list( "competition_results").await?;
         items.sort_by(|a, b| b.submitted_at.cmp(&a.submitted_at));
         Ok(items)
     }
 
     pub async fn upsert_result(&self, result: CompetitionResult) -> AppResult<()> {
-        kv_upsert(&self.conn, "competition_results", &result.id, &result).await
+        self.kv_upsert( "competition_results", &result.id, &result).await
     }
 
     pub async fn get_result(&self, id: &str) -> AppResult<Option<CompetitionResult>> {
-        kv_get(&self.conn, "competition_results", id).await
+        self.kv_get( "competition_results", id).await
     }
 
     // --- cms ---
 
     pub async fn list_cms_pages(&self) -> AppResult<Vec<CmsPage>> {
-        let mut pages: Vec<CmsPage> = kv_list(&self.conn, "cms_pages").await?;
+        let mut pages: Vec<CmsPage> = self.kv_list( "cms_pages").await?;
         pages.sort_by(|a, b| a.slug.cmp(&b.slug));
         Ok(pages)
     }
 
     pub async fn upsert_cms_page(&self, page: CmsPage) -> AppResult<()> {
-        kv_upsert(&self.conn, "cms_pages", &page.id, &page).await
+        self.kv_upsert( "cms_pages", &page.id, &page).await
     }
 
     pub async fn get_cms_page(&self, id: &str) -> AppResult<Option<CmsPage>> {
-        kv_get(&self.conn, "cms_pages", id).await
+        self.kv_get( "cms_pages", id).await
     }
 
     pub async fn delete_cms_page(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.conn, "cms_pages", id).await
+        self.kv_delete( "cms_pages", id).await
     }
 
     // --- contact messages ---
 
     pub async fn list_contact_messages(&self) -> AppResult<Vec<ContactMessage>> {
-        let mut items: Vec<ContactMessage> = kv_list(&self.conn, "contact_messages").await?;
+        let mut items: Vec<ContactMessage> = self.kv_list( "contact_messages").await?;
         items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(items)
     }
 
     pub async fn get_contact_message(&self, id: &str) -> AppResult<Option<ContactMessage>> {
-        kv_get(&self.conn, "contact_messages", id).await
+        self.kv_get( "contact_messages", id).await
     }
 
     pub async fn upsert_contact_message(&self, message: ContactMessage) -> AppResult<()> {
-        kv_upsert(&self.conn, "contact_messages", &message.id, &message).await
+        self.kv_upsert( "contact_messages", &message.id, &message).await
     }
 
     pub async fn delete_contact_message(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.conn, "contact_messages", id).await
+        self.kv_delete( "contact_messages", id).await
     }
 
     // --- notifications ---
@@ -616,22 +716,22 @@ impl Database {
         &self,
         user_id: &str,
     ) -> AppResult<Vec<Notification>> {
-        let mut items: Vec<Notification> = kv_list(&self.conn, "notifications").await?;
+        let mut items: Vec<Notification> = self.kv_list( "notifications").await?;
         items.retain(|n| n.user_id == user_id);
         items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         Ok(items)
     }
 
     pub async fn get_notification(&self, id: &str) -> AppResult<Option<Notification>> {
-        kv_get(&self.conn, "notifications", id).await
+        self.kv_get( "notifications", id).await
     }
 
     pub async fn upsert_notification(&self, notification: Notification) -> AppResult<()> {
-        kv_upsert(&self.conn, "notifications", &notification.id, &notification).await
+        self.kv_upsert( "notifications", &notification.id, &notification).await
     }
 
     pub async fn delete_notification(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.conn, "notifications", id).await
+        self.kv_delete( "notifications", id).await
     }
 
     pub async fn unread_notification_count(&self, user_id: &str) -> AppResult<usize> {
@@ -717,7 +817,7 @@ impl Database {
     // --- logs ---
 
     pub async fn list_logs(&self, limit: usize) -> AppResult<Vec<SystemLog>> {
-        let mut logs: Vec<SystemLog> = kv_list(&self.conn, "system_logs").await?;
+        let mut logs: Vec<SystemLog> = self.kv_list( "system_logs").await?;
         logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         logs.truncate(limit);
         Ok(logs)
@@ -750,7 +850,7 @@ impl Database {
             actor_id: actor_id.map(|s| s.to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        kv_upsert(&self.conn, "system_logs", &log.id, &log).await
+        self.kv_upsert( "system_logs", &log.id, &log).await
     }
 
     // --- stats ---
@@ -829,7 +929,7 @@ impl Database {
     // --- attendance ---
 
     pub async fn get_attendance_session(&self) -> AppResult<Option<AttendanceSession>> {
-        kv_get(&self.conn, "meta", "attendance_session").await
+        self.kv_get( "meta", "attendance_session").await
     }
 
     pub async fn set_attendance_session(&self, session: AttendanceSession) -> AppResult<()> {
@@ -838,7 +938,7 @@ impl Database {
     }
 
     pub async fn list_attendance_raw(&self) -> AppResult<Vec<AttendanceRecord>> {
-        kv_list(&self.conn, "attendance").await
+        self.kv_list( "attendance").await
     }
 
     pub async fn list_attendance_in_window(&self) -> AppResult<Vec<AttendanceRecord>> {
@@ -867,14 +967,14 @@ impl Database {
                 })
                 .unwrap_or(false);
             if !keep {
-                kv_delete(&self.conn, "attendance", &r.id).await?;
+                self.kv_delete( "attendance", &r.id).await?;
             }
         }
         Ok(())
     }
 
     pub async fn upsert_attendance(&self, record: AttendanceRecord) -> AppResult<()> {
-        kv_upsert(&self.conn, "attendance", &record.id, &record).await
+        self.kv_upsert( "attendance", &record.id, &record).await
     }
 
     pub async fn check_in_attendance(
@@ -920,21 +1020,21 @@ impl Database {
     // --- training plans ---
 
     pub async fn list_plans(&self) -> AppResult<Vec<TrainingPlan>> {
-        let mut plans: Vec<TrainingPlan> = kv_list(&self.conn, "training_plans").await?;
+        let mut plans: Vec<TrainingPlan> = self.kv_list( "training_plans").await?;
         plans.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(plans)
     }
 
     pub async fn get_plan(&self, id: &str) -> AppResult<Option<TrainingPlan>> {
-        kv_get(&self.conn, "training_plans", id).await
+        self.kv_get( "training_plans", id).await
     }
 
     pub async fn upsert_plan(&self, plan: TrainingPlan) -> AppResult<()> {
-        kv_upsert(&self.conn, "training_plans", &plan.id, &plan).await
+        self.kv_upsert( "training_plans", &plan.id, &plan).await
     }
 
     pub async fn delete_plan(&self, id: &str) -> AppResult<()> {
-        kv_delete(&self.conn, "training_plans", id).await
+        self.kv_delete( "training_plans", id).await
     }
 
     pub async fn plans_for_user(&self, user_id: &str) -> AppResult<Vec<TrainingPlan>> {
@@ -949,7 +1049,7 @@ impl Database {
     }
 
     pub async fn list_plan_progress(&self) -> AppResult<Vec<TrainingPlanProgress>> {
-        kv_list(&self.conn, "plan_progress").await
+        self.kv_list( "plan_progress").await
     }
 
     pub async fn list_plan_progress_for_user(
@@ -970,14 +1070,14 @@ impl Database {
         user_id: &str,
     ) -> AppResult<Option<TrainingPlanProgress>> {
         let key = format!("{plan_id}:{user_id}");
-        kv_get(&self.conn, "plan_progress", &key).await
+        self.kv_get( "plan_progress", &key).await
     }
 
     pub async fn upsert_plan_progress(&self, progress: TrainingPlanProgress) -> AppResult<()> {
         let key = format!("{}:{}", progress.plan_id, progress.user_id);
         let mut p = progress;
         p.id = key.clone();
-        kv_upsert(&self.conn, "plan_progress", &key, &p).await
+        self.kv_upsert( "plan_progress", &key, &p).await
     }
 
     // --- generic DB admin ---
@@ -1015,7 +1115,7 @@ impl Database {
             "plan_progress" => values_from_list(self.list_plan_progress().await?),
             "contact_messages" => values_from_list(self.list_contact_messages().await?),
             "notifications" => {
-                let items: Vec<Notification> = kv_list(&self.conn, "notifications").await?;
+                let items: Vec<Notification> = self.kv_list( "notifications").await?;
                 values_from_list(items)
             }
             "meta" => self.list_meta_raw().await,
@@ -1083,14 +1183,14 @@ impl Database {
         match table {
             "athlete_profiles" => self.delete_profile(id).await,
             "cms_pages" => self.delete_cms_page(id).await,
-            "feature_flags" => kv_delete(&self.conn, "feature_flags", id).await,
-            "competition_results" => kv_delete(&self.conn, "competition_results", id).await,
+            "feature_flags" => self.kv_delete( "feature_flags", id).await,
+            "competition_results" => self.kv_delete( "competition_results", id).await,
             "training_plans" => self.delete_plan(id).await,
-            "attendance" => kv_delete(&self.conn, "attendance", id).await,
+            "attendance" => self.kv_delete( "attendance", id).await,
             "meta" => self.delete_meta(id).await,
             "users" => self.delete_user(id).await,
-            "system_logs" => kv_delete(&self.conn, "system_logs", id).await,
-            "plan_progress" => kv_delete(&self.conn, "plan_progress", id).await,
+            "system_logs" => self.kv_delete( "system_logs", id).await,
+            "plan_progress" => self.kv_delete( "plan_progress", id).await,
             "contact_messages" => self.delete_contact_message(id).await,
             "notifications" => self.delete_notification(id).await,
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
@@ -1099,18 +1199,20 @@ impl Database {
 
     async fn list_meta_raw(&self) -> AppResult<Vec<Value>> {
         ensure_table("meta")?;
-        let mut rows_iter = self
-            .conn
-            .query("SELECT key, value FROM meta", ())
-            .await
-            .map_err(internal)?;
-        let mut rows = Vec::new();
-        while let Some(row) = rows_iter.next().await.map_err(internal)? {
-            let key: String = row.get(0).map_err(internal)?;
-            let value: String = row.get(1).map_err(internal)?;
-            rows.push(serde_json::json!({ "key": key, "value": value }));
-        }
-        Ok(rows)
+        self.db_op(|conn| async move {
+            let mut rows_iter = conn
+                .query("SELECT key, value FROM meta", ())
+                .await
+                .map_err(internal)?;
+            let mut rows = Vec::new();
+            while let Some(row) = rows_iter.next().await.map_err(internal)? {
+                let key: String = row.get(0).map_err(internal)?;
+                let value: String = row.get(1).map_err(internal)?;
+                rows.push(serde_json::json!({ "key": key, "value": value }));
+            }
+            Ok(rows)
+        })
+        .await
     }
 
     async fn upsert_meta(&self, key: &str, value: &str) -> AppResult<()> {
@@ -1124,26 +1226,36 @@ impl Database {
     async fn kv_get_raw(&self, table: &str, key: &str) -> AppResult<Option<String>> {
         ensure_table(table)?;
         let sql = format!("SELECT value FROM {table} WHERE key = ?1");
-        let mut rows = self
-            .conn
-            .query(&sql, params![key])
-            .await
-            .map_err(internal)?;
-        match rows.next().await.map_err(internal)? {
-            Some(row) => Ok(Some(row.get::<String>(0).map_err(internal)?)),
-            None => Ok(None),
-        }
+        let key = key.to_string();
+        self.db_op(|conn| {
+            let sql = sql.clone();
+            let key = key.clone();
+            async move {
+                let mut rows = conn.query(&sql, params![key]).await.map_err(internal)?;
+                match rows.next().await.map_err(internal)? {
+                    Some(row) => Ok(Some(row.get::<String>(0).map_err(internal)?)),
+                    None => Ok(None),
+                }
+            }
+        })
+        .await
     }
 
     async fn kv_list_raw(&self, table: &str) -> AppResult<Vec<String>> {
         ensure_table(table)?;
         let sql = format!("SELECT value FROM {table}");
-        let mut rows = self.conn.query(&sql, ()).await.map_err(internal)?;
-        let mut items = Vec::new();
-        while let Some(row) = rows.next().await.map_err(internal)? {
-            items.push(row.get::<String>(0).map_err(internal)?);
-        }
-        Ok(items)
+        self.db_op(|conn| {
+            let sql = sql.clone();
+            async move {
+                let mut rows = conn.query(&sql, ()).await.map_err(internal)?;
+                let mut items = Vec::new();
+                while let Some(row) = rows.next().await.map_err(internal)? {
+                    items.push(row.get::<String>(0).map_err(internal)?);
+                }
+                Ok(items)
+            }
+        })
+        .await
     }
 
     async fn kv_upsert_raw(&self, table: &str, key: &str, value: &str) -> AppResult<()> {
@@ -1152,21 +1264,96 @@ impl Database {
             "INSERT INTO {table} (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value"
         );
-        self.conn
-            .execute(&sql, params![key, value])
-            .await
-            .map_err(internal)?;
-        Ok(())
+        let key = key.to_string();
+        let value = value.to_string();
+        self.db_op(|conn| {
+            let sql = sql.clone();
+            let key = key.clone();
+            let value = value.clone();
+            async move {
+                conn.execute(&sql, params![key, value])
+                    .await
+                    .map_err(internal)?;
+                Ok(())
+            }
+        })
+        .await
     }
 
     async fn kv_delete_raw(&self, table: &str, key: &str) -> AppResult<()> {
         ensure_table(table)?;
         let sql = format!("DELETE FROM {table} WHERE key = ?1");
-        self.conn
-            .execute(&sql, params![key])
-            .await
-            .map_err(internal)?;
-        Ok(())
+        let key = key.to_string();
+        self.db_op(|conn| {
+            let sql = sql.clone();
+            let key = key.clone();
+            async move {
+                conn.execute(&sql, params![key]).await.map_err(internal)?;
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    async fn kv_list<T: for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        table: &str,
+    ) -> AppResult<Vec<T>> {
+        ensure_table(table)?;
+        let sql = format!("SELECT value FROM {table}");
+        self.db_op(|conn| {
+            let sql = sql.clone();
+            async move {
+                let mut rows = conn.query(&sql, ()).await.map_err(internal)?;
+                let mut items = Vec::new();
+                while let Some(row) = rows.next().await.map_err(internal)? {
+                    let value: String = row.get(0).map_err(internal)?;
+                    items.push(serde_json::from_str(&value).map_err(internal)?);
+                }
+                Ok(items)
+            }
+        })
+        .await
+    }
+
+    async fn kv_get<T: for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        table: &str,
+        key: &str,
+    ) -> AppResult<Option<T>> {
+        ensure_table(table)?;
+        let sql = format!("SELECT value FROM {table} WHERE key = ?1");
+        let key = key.to_string();
+        self.db_op(|conn| {
+            let sql = sql.clone();
+            let key = key.clone();
+            async move {
+                let mut rows = conn.query(&sql, params![key]).await.map_err(internal)?;
+                match rows.next().await.map_err(internal)? {
+                    Some(row) => {
+                        let value: String = row.get(0).map_err(internal)?;
+                        Ok(Some(serde_json::from_str(&value).map_err(internal)?))
+                    }
+                    None => Ok(None),
+                }
+            }
+        })
+        .await
+    }
+
+    async fn kv_upsert<T: Serialize + Sync>(
+        &self,
+        table: &str,
+        key: &str,
+        value: &T,
+    ) -> AppResult<()> {
+        ensure_table(table)?;
+        let payload = serde_json::to_string(value).map_err(internal)?;
+        self.kv_upsert_raw(table, key, &payload).await
+    }
+
+    async fn kv_delete(&self, table: &str, key: &str) -> AppResult<()> {
+        self.kv_delete_raw(table, key).await
     }
 }
 
@@ -1183,65 +1370,6 @@ fn ensure_table(table: &str) -> AppResult<()> {
     } else {
         Err(AppError::NotFound(format!("Nieznana tabela: {table}")))
     }
-}
-
-async fn kv_list<T: for<'de> Deserialize<'de>>(
-    conn: &Connection,
-    table: &str,
-) -> AppResult<Vec<T>> {
-    ensure_table(table)?;
-    let sql = format!("SELECT value FROM {table}");
-    let mut rows = conn.query(&sql, ()).await.map_err(internal)?;
-    let mut items = Vec::new();
-    while let Some(row) = rows.next().await.map_err(internal)? {
-        let value: String = row.get(0).map_err(internal)?;
-        items.push(serde_json::from_str(&value).map_err(internal)?);
-    }
-    Ok(items)
-}
-
-async fn kv_get<T: for<'de> Deserialize<'de>>(
-    conn: &Connection,
-    table: &str,
-    key: &str,
-) -> AppResult<Option<T>> {
-    ensure_table(table)?;
-    let sql = format!("SELECT value FROM {table} WHERE key = ?1");
-    let mut rows = conn.query(&sql, params![key]).await.map_err(internal)?;
-    match rows.next().await.map_err(internal)? {
-        Some(row) => {
-            let value: String = row.get(0).map_err(internal)?;
-            Ok(Some(serde_json::from_str(&value).map_err(internal)?))
-        }
-        None => Ok(None),
-    }
-}
-
-async fn kv_upsert<T: Serialize>(
-    conn: &Connection,
-    table: &str,
-    key: &str,
-    value: &T,
-) -> AppResult<()> {
-    ensure_table(table)?;
-    let payload = serde_json::to_string(value).map_err(internal)?;
-    let sql = format!(
-        "INSERT INTO {table} (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-    );
-    conn.execute(&sql, params![key, payload])
-        .await
-        .map_err(internal)?;
-    Ok(())
-}
-
-async fn kv_delete(conn: &Connection, table: &str, key: &str) -> AppResult<()> {
-    ensure_table(table)?;
-    let sql = format!("DELETE FROM {table} WHERE key = ?1");
-    conn.execute(&sql, params![key])
-        .await
-        .map_err(internal)?;
-    Ok(())
 }
 
 fn attendance_window_bounds() -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
