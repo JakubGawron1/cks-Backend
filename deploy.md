@@ -5,27 +5,40 @@
 | Środowisko | Jak |
 |------------|-----|
 | **Dev** | wyłącznie `cargo run` (`PRODUCTION_MODE=dev`, lokalny plik SQLite) |
-| **Hosting** | Docker — **Hugging Face Space** lub Render Free + **Turso** |
+| **Hosting** | Docker na **Hugging Face Space** — deploy z **GitHuba** (Actions) + **Turso** |
 
 Aktualny produkcyjny target: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)  
-URL API: `https://koliber-cks-slavia.hf.space`
+URL API: `https://koliber-cks-slavia.hf.space`  
+Repo źródłowe: [JakubGawron1/cks-Backend](https://github.com/JakubGawron1/cks-Backend)
 
 ---
 
-## A) Hugging Face Space (główny)
+## A) Hugging Face Space przez GitHub (główny)
 
-### Co jest gotowe
+Push na `main` w GitHubie → workflow **Sync to Hugging Face Space** → mirror na Space → build Dockera.
 
 | Plik | Rola |
 |------|------|
-| `Dockerfile` | multi-stage, `CARGO_BUILD_JOBS=2`, port **8080** (`app_port`) |
+| `.github/workflows/sync-to-hf.yml` | sync GitHub → HF (`huggingface/hub-sync`) |
+| `Dockerfile` | multi-stage, `CARGO_BUILD_JOBS=2`, port **8080** |
 | `README.md` | YAML frontmatter HF (`sdk: docker`) |
-| `GET /api/health` | healthcheck |
-| `GET /` | strona index → link do Vercel |
 
-Na Space wymagane: `PRODUCTION_MODE=production`, `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `JWT_SECRET`, `FRONTEND_ORIGIN` (lub `CORS_ALLOWED_ORIGINS`), `SEED_SUPERADMIN_PASSWORD` (nie domyślne).
+### 1. Jednorazowo: secret `HF_TOKEN` w GitHubie
 
-### 1. Secrets w Space
+1. Token HF z uprawnieniem **write** do Spaces: [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+2. W repo GitHub: **Settings → Secrets and variables → Actions → New repository secret**
+   - Name: `HF_TOKEN`
+   - Value: token z kroku 1
+
+Albo CLI:
+
+```bash
+cd slavia-backend
+gh secret set HF_TOKEN
+# wklej token HF
+```
+
+### 2. Secrets aplikacji w Space
 
 [Settings → Variables and secrets](https://huggingface.co/spaces/koliber/cks-slavia/settings):
 
@@ -43,32 +56,30 @@ Alias URL: `TURSO_DATABASE_URL` (jeśli ustawisz zamiast `DATABASE_URL`).
 
 ### Turso — szybki start
 
-1. Utwórz bazę w [Turso](https://turso.tech/) (`turso db create slavia` lub Dashboard).
+1. Utwórz bazę w [Turso](https://turso.tech/).
 2. Skopiuj URL (`libsql://…`) i auth token.
 3. Wklej jako secrets Space (powyżej).
 
-### 2. Zastąpienie starego kodu (force push)
+### 3. Deploy
 
 ```bash
 cd slavia-backend
-hf auth login   # token z uprawnieniem write do Spaces
-git remote add hf https://huggingface.co/spaces/koliber/cks-slavia
-# jeśli remote już jest:
-# git remote set-url hf https://huggingface.co/spaces/koliber/cks-slavia
-git push hf main --force
+git push origin main
 ```
 
-HF zbuduje obraz z `Dockerfile` (pierwszy build Rust: długo).  
-Status: [Space](https://huggingface.co/spaces/koliber/cks-slavia) → Building → Running.
+Albo ręcznie: GitHub → **Actions** → **Sync to Hugging Face Space** → **Run workflow**.
 
-### 3. Weryfikacja
+Status: [Space](https://huggingface.co/spaces/koliber/cks-slavia) → Building → Running.  
+Workflow: [Actions](https://github.com/JakubGawron1/cks-Backend/actions).
+
+### 4. Weryfikacja
 
 ```bash
 curl https://koliber-cks-slavia.hf.space/api/health
 curl https://koliber-cks-slavia.hf.space/
 ```
 
-### 4. Frontend (Vercel)
+### 5. Frontend (Vercel)
 
 ```env
 NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
@@ -80,13 +91,19 @@ NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
 
 Trwałe dane: **Turso**. Lokalny plik w kontenerze nie jest używany przy `PRODUCTION_MODE=production`.
 
+### Awaryjnie (bez GitHuba)
+
+Tylko gdy Actions nie działa — nie używaj na co dzień:
+
+```bash
+git push hf main --force
+```
+
 ---
 
 ## B) Render Free (alternatywa)
 
-Szczegóły poniżej — ten sam `Dockerfile`, `render.yaml`.
-
-Backend czyta `PORT`. Na Renderze te same wymagane sekrety co na HF (w tym Turso).
+Ten sam `Dockerfile`, `render.yaml`. Te same sekrety co na HF (w tym Turso).
 
 ### Blueprint
 
@@ -94,16 +111,13 @@ Backend czyta `PORT`. Na Renderze te same wymagane sekrety co na HF (w tym Turso
 2. Podłącz repo → `render.yaml`
 3. Ustaw `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_*`
 
-### Ręcznie
-
-**New** → **Web Service** → Docker → Free → Health Check `/api/health`
-
 ---
 
 ## Checklist (HF)
 
-- [ ] Secrets: `PRODUCTION_MODE=production`, `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD`
-- [ ] Force push obecnego `main` na Space
+- [ ] GitHub secret `HF_TOKEN` (write do Spaces)
+- [ ] Space secrets: `PRODUCTION_MODE=production`, `DATABASE_URL`, `TURSO_AUTH_TOKEN`, `JWT_SECRET`, `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_PASSWORD`
+- [ ] `git push origin main` → zielony workflow Actions
 - [ ] `curl …/api/health` → ok
 - [ ] Vercel: `NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space` + redeploy
 - [ ] Login z frontendu działa (CORS = origin Vercel)
@@ -114,20 +128,21 @@ Backend czyta `PORT`. Na Renderze te same wymagane sekrety co na HF (w tym Turso
 
 | Objaw | Co zrobić |
 |-------|-----------|
+| Actions: auth / 401 | Sprawdź `HF_TOKEN` (write) i dostęp do `koliber/cks-slavia` |
 | Crash przy starcie: brak env | Ustaw secrets w Space Settings (w tym Turso) |
 | Build OOM / timeout | Redeploy; `CARGO_BUILD_JOBS=2` już w Dockerfile |
 | CORS / Failed to fetch | `FRONTEND_ORIGIN=https://slavia.vercel.app` + poprawne `NEXT_PUBLIC_API_URL` |
-| Stary kod na Space | `git push hf main --force` z tego repo |
+| Stary kod na Space | Push na `main` albo **Run workflow**; sprawdź logi Actions |
 | Błąd Turso / auth | Sprawdź `DATABASE_URL` (`libsql://`) i `TURSO_AUTH_TOKEN` |
 
 ---
 
-## Skrót HF
+## Skrót
 
 ```text
-1. Turso: DATABASE_URL + TURSO_AUTH_TOKEN
-2. Secrets: PRODUCTION_MODE=production, JWT, FRONTEND_ORIGIN, SEED password
-3. hf auth login && git push hf main --force
+1. gh secret set HF_TOKEN  (jednorazowo)
+2. Secrets Space: Turso + JWT + FRONTEND_ORIGIN + SEED
+3. git push origin main
 4. curl https://koliber-cks-slavia.hf.space/api/health
 5. Vercel: NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
 ```

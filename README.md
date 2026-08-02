@@ -34,11 +34,16 @@ cargo run
 API: `http://127.0.0.1:8080`  
 Frontend lokalnie: `NEXT_PUBLIC_API_URL=http://127.0.0.1:8080`
 
-## Deploy — Hugging Face Space
+## Deploy — Hugging Face Space (z GitHuba)
 
-Space: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)
+Space: [koliber/cks-slavia](https://huggingface.co/spaces/koliber/cks-slavia)  
+Źródło: push na `main` w [cks-Backend](https://github.com/JakubGawron1/cks-Backend) → Actions sync → build Space.
 
-### Secrets (Settings → Variables and secrets)
+### Jednorazowo: `HF_TOKEN` w GitHubie
+
+Secret Actions z tokenem HF (**write** do Spaces). Szczegóły: [deploy.md](./deploy.md).
+
+### Secrets aplikacji (Space Settings → Variables and secrets)
 
 | Klucz | Wymagane | Opis |
 |-------|----------|------|
@@ -70,15 +75,13 @@ NEXT_PUBLIC_API_URL=https://koliber-cks-slavia.hf.space
 
 Po zmianie — **Redeploy** frontendu.
 
-### Push na Space (zastąpienie starego kodu)
+### Deploy
 
 ```bash
-git remote add hf https://huggingface.co/spaces/koliber/cks-slavia
-# lub: git remote set-url hf ...
-git push hf main --force
+git push origin main
 ```
 
-Wymaga zalogowania: `hf auth login` (token z write do Spaces).
+Workflow: `.github/workflows/sync-to-hf.yml`. Status: [Actions](https://github.com/JakubGawron1/cks-Backend/actions) oraz [Space](https://huggingface.co/spaces/koliber/cks-slavia).
 
 Healthcheck:
 
