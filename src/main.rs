@@ -27,6 +27,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let config = Config::from_env()?;
+    if Config::is_render() {
+        tracing::info!("Render detected — PORT={}, origins={:?}", config.port, config.frontend_origins);
+        if !config.is_remote_db() {
+            tracing::warn!(
+                "Baza plikowa na Free Render jest efemeryczna (znika po redeploy/śnie). Rozważ Turso."
+            );
+        }
+    }
+
     let cors = config.cors_layer()?;
     let db = Database::connect(&config).await?;
     db.migrate().await?;

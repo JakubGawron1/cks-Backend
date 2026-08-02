@@ -1,0 +1,12 @@
+target
+data
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.md
+.DS_Store
+**/*.redb
+**/*.db
+**/*.db-*

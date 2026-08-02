@@ -3,6 +3,10 @@ name = "slavia-backend"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+strip = true
+opt-level = 3
+
 [dependencies]
 anyhow = "1"
 argon2 = "0.5"

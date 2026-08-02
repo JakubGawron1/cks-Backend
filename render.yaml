@@ -1,0 +1,31 @@
+# Blueprint Render — Free Web Service (Docker)
+# Dashboard: New → Blueprint → podłącz to repo
+# Secrets (FRONTEND_ORIGIN, SEED_*) ustawisz przy pierwszym deployu / w Environment.
+
+services:
+  - type: web
+    name: slavia-backend
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRY_HOURS
+        value: "72"
+      - key: DATABASE_URL
+        value: file:/app/data/slavia.redb
+      - key: HOST
+        value: 0.0.0.0
+      - key: RUST_LOG
+        value: slavia_backend=info,tower_http=info,axum=info
+      # Ustaw w dashboardzie (origin Vercel, bez trailing slash):
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: SEED_SUPERADMIN_EMAIL
+        sync: false
+      - key: SEED_SUPERADMIN_PASSWORD
+        sync: false

@@ -26,7 +26,14 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Render ustawia `RENDER=true` na każdej usłudze.
+    pub fn is_render() -> bool {
+        std::env::var("RENDER").is_ok()
+    }
+
     pub fn from_env() -> Result<Self, ConfigError> {
+        let on_render = Self::is_render();
+
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "file:./data/slavia.redb".to_string());
 
@@ -38,9 +45,19 @@ impl Config {
             return Err(ConfigError::Missing("TURSO_AUTH_TOKEN"));
         }
 
-        let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| {
-            "dev-only-change-me-cks-slavia-super-secret-key".to_string()
-        });
+        let jwt_secret = if on_render {
+            std::env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?
+        } else {
+            std::env::var("JWT_SECRET").unwrap_or_else(|_| {
+                "dev-only-change-me-cks-slavia-super-secret-key".to_string()
+            })
+        };
+
+        if jwt_secret.len() < 16 {
+            return Err(ConfigError::Invalid(
+                "JWT_SECRET musi mieć co najmniej 16 znaków".into(),
+            ));
+        }
 
         let jwt_expiry_hours = std::env::var("JWT_EXPIRY_HOURS")
             .ok()
@@ -57,12 +74,21 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(8080);
 
-        let frontend_origins = std::env::var("FRONTEND_ORIGIN")
-            .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
+        let frontend_origins = if on_render {
+            let raw = std::env::var("FRONTEND_ORIGIN")
+                .map_err(|_| ConfigError::Missing("FRONTEND_ORIGIN"))?;
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        } else {
+            std::env::var("FRONTEND_ORIGIN")
+                .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        };
 
         if frontend_origins.is_empty() {
             return Err(ConfigError::Invalid("FRONTEND_ORIGIN".into()));
@@ -71,9 +97,21 @@ impl Config {
         let seed_superadmin_email = std::env::var("SEED_SUPERADMIN_EMAIL")
             .or_else(|_| std::env::var("SEED_ADMIN_EMAIL"))
             .unwrap_or_else(|_| "superadmin@cks-slavia.local".to_string());
-        let seed_superadmin_password = std::env::var("SEED_SUPERADMIN_PASSWORD")
-            .or_else(|_| std::env::var("SEED_ADMIN_PASSWORD"))
-            .unwrap_or_else(|_| "superadmin123!".to_string());
+        let seed_superadmin_password = if on_render {
+            std::env::var("SEED_SUPERADMIN_PASSWORD")
+                .or_else(|_| std::env::var("SEED_ADMIN_PASSWORD"))
+                .map_err(|_| ConfigError::Missing("SEED_SUPERADMIN_PASSWORD"))?
+        } else {
+            std::env::var("SEED_SUPERADMIN_PASSWORD")
+                .or_else(|_| std::env::var("SEED_ADMIN_PASSWORD"))
+                .unwrap_or_else(|_| "superadmin123!".to_string())
+        };
+
+        if on_render && seed_superadmin_password == "superadmin123!" {
+            return Err(ConfigError::Invalid(
+                "SEED_SUPERADMIN_PASSWORD: ustaw własne hasło (nie domyślne)".into(),
+            ));
+        }
 
         Ok(Self {
             database_url,

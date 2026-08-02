@@ -7,9 +7,10 @@ API: logowanie JWT, role łączone (`zawodnik` | `trener` | `admin` | `superadmi
 | Środowisko | Jak uruchamiać |
 |------------|----------------|
 | **Dev (lokalnie)** | wyłącznie `cargo run` |
-| **Hosting (Hugging Face)** | Docker (`Dockerfile`) |
+| **Hosting** | Docker (`Dockerfile` + `render.yaml`) na **Render Free** |
 
-**Nie używaj Dockera do codziennego developmentu.** Docker służy tylko do wdrożenia API na Hugging Face.
+**Nie używaj Dockera do codziennego developmentu.**  
+**Nie hostujemy na Hugging Face Docker Spaces** — utworzenie wymaga płatnego HF PRO. Instrukcja: [deploy.md](./deploy.md).
 
 ## Dev — lokalnie
 
@@ -21,6 +22,17 @@ cargo run
 API: `http://127.0.0.1:8080`
 
 Lokalnie: baza plikowa **redb** (`./data/slavia.redb`). Frontend: `NEXT_PUBLIC_API_URL=http://127.0.0.1:8080`.
+
+## Deploy (Render Free)
+
+Szybki start:
+
+1. Push repo na GitHub
+2. Render → **New** → **Blueprint** → wybierz to repo (`render.yaml`)
+3. Ustaw `FRONTEND_ORIGIN`, `SEED_SUPERADMIN_EMAIL`, `SEED_SUPERADMIN_PASSWORD`
+4. `curl https://TWOJ-SERWIS.onrender.com/api/health`
+
+Pełna instrukcja: [deploy.md](./deploy.md).
 
 ## Produkcja / Turso
 
@@ -64,11 +76,13 @@ Przy pustej bazie tworzone jest **wyłącznie** konto z najwyższymi uprawnienia
 
 Pozostałe role (`admin`, `trener`, `zawodnik`) nadaje później superadmin.
 
-## Docker — tylko Hugging Face
+## Docker — tylko hosting (Render)
 
-Obraz jest przeznaczony pod Space / kontener HF, **nie** pod lokalny workflow.
+Obraz pod deploy kontenera na Render. **Nie** pod lokalny workflow i **nie** pod HF Docker Spaces.
 
 ```bash
-# budowanie pod deploy na Hugging Face — nie do codziennego dev
+# budowanie pod deploy — nie do codziennego dev
 docker build -t slavia-backend .
 ```
+
+Pliki: `Dockerfile`, `.dockerignore`, `render.yaml`. Instrukcja: [deploy.md](./deploy.md).
