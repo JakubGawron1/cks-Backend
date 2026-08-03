@@ -12,6 +12,14 @@ Format sekcji:
 
 Opcjonalnie po dacie: `!breaking` (breaking API).
 
+## [1.0.0.1+1] - 2026-08-03
+
+### `end_date` dla zawodów
+
+- `CalendarEvent.end_date` (włącznie); brak / równy `date` = jednodniowe.
+- Walidacja w create/update: treningi bez zakresu; zawody z opcjonalnym zakresem.
+- Publiczne / zawodnik DTO zwracają `end_date` gdy zakres > 1 dzień.
+
 ## [1.0.0] - 2026-08-03
 
 ### Wspólna wersja OpenAPI
