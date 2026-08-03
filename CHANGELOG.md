@@ -20,6 +20,12 @@ Opcjonalnie po dacie: `!breaking` (breaking API).
 - Walidacja w create/update: treningi bez zakresu; zawody z opcjonalnym zakresem.
 - Publiczne / zawodnik DTO zwracają `end_date` gdy zakres > 1 dzień.
 
+### Fix: wydajność `/api/events/mine`
+
+- Jednorazowe `list_profiles` + `list_attendance` przy budowie widoku zawodnika (wcześniej per event).
+- `reconcile_past_training_attendance_since_days` — batch + limit dni (mine: 21, attendance: 62).
+- Widoczność: `club_assigned` **lub** `all_athletes` **lub** skład; treningi bez rozdmuchanej listy `assigned_athletes`.
+
 ## [1.0.0] - 2026-08-03
 
 ### Wspólna wersja OpenAPI

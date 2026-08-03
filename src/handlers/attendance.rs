@@ -124,7 +124,10 @@ pub async fn list_attendance(
     if let Some(ref event_id) = query.event_id {
         let _ = state.db.reconcile_attendance_for_event(event_id).await;
     } else {
-        let _ = state.db.reconcile_past_training_attendance().await;
+        let _ = state
+            .db
+            .reconcile_past_training_attendance_since_days(62)
+            .await;
     }
 
     let is_staff =

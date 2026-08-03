@@ -1579,11 +1579,23 @@ impl Database {
 
         let profiles = self.list_profiles().await?;
         let users = self.list_users().await?;
-        let existing = self.list_attendance_raw().await?;
+        let mut existing = self.list_attendance_raw().await?;
+        self.reconcile_absents_for_event(&event, &profiles, &users, &mut existing)
+            .await
+    }
+
+    async fn reconcile_absents_for_event(
+        &self,
+        event: &CalendarEvent,
+        profiles: &[AthleteProfile],
+        users: &[UserRecord],
+        existing: &mut Vec<AttendanceRecord>,
+    ) -> AppResult<usize> {
+        let event_id = event.id.as_str();
         let mut created = 0usize;
         let now = chrono::Utc::now().to_rfc3339();
 
-        for profile in &profiles {
+        for profile in profiles {
             if profile.user_id == "manual" || profile.user_id.is_empty() {
                 continue;
             }
@@ -1596,13 +1608,11 @@ impl Database {
                 continue;
             }
 
-            let profile_ids = vec![profile.id.clone()];
-            if self.athlete_has_accepted_withdrawal(&event, &profile_ids, &profile.user_id) {
+            let profile_ids = [profile.id.clone()];
+            if self.athlete_has_accepted_withdrawal(event, &profile_ids, &profile.user_id) {
                 continue;
             }
-            if !event.all_athletes
-                && !event.assigned_athlete_ids.contains(&profile.id)
-            {
+            if !event.all_athletes && !event.assigned_athlete_ids.contains(&profile.id) {
                 continue;
             }
 
@@ -1635,20 +1645,56 @@ impl Database {
                 status: "absent".into(),
                 source: "auto".into(),
             };
-            self.upsert_attendance(record).await?;
+            self.upsert_attendance(record.clone()).await?;
+            existing.push(record);
             created += 1;
         }
         Ok(created)
     }
 
     pub async fn reconcile_past_training_attendance(&self) -> AppResult<()> {
+        self.reconcile_past_training_attendance_since_days(i64::MAX)
+            .await
+    }
+
+    /// Auto-nieobecności tylko dla treningów z datą ≥ (dziś − days).
+    /// Unika N× list_profiles/users/attendance na każde GET /events/mine.
+    pub async fn reconcile_past_training_attendance_since_days(
+        &self,
+        days: i64,
+    ) -> AppResult<()> {
         let defaults = self.get_training_schedule_defaults().await?;
         let events = self.list_events().await?;
-        for e in events {
-            if e.event_type == "trening" && e.status == "scheduled" && attendance_window_closed(&e, &defaults)
-            {
-                let _ = self.reconcile_attendance_for_event(&e.id).await?;
-            }
+        let cutoff = if days == i64::MAX {
+            None
+        } else {
+            let d = chrono::Local::now().date_naive() - chrono::Duration::days(days.max(0));
+            Some(d.format("%Y-%m-%d").to_string())
+        };
+
+        let closed: Vec<CalendarEvent> = events
+            .into_iter()
+            .filter(|e| {
+                e.event_type == "trening"
+                    && e.status == "scheduled"
+                    && attendance_window_closed(e, &defaults)
+                    && cutoff
+                        .as_ref()
+                        .map(|c| e.date.as_str() >= c.as_str())
+                        .unwrap_or(true)
+            })
+            .collect();
+        if closed.is_empty() {
+            return Ok(());
+        }
+
+        let profiles = self.list_profiles().await?;
+        let users = self.list_users().await?;
+        let mut existing = self.list_attendance_raw().await?;
+        for event in &closed {
+            let _ = self
+                .reconcile_absents_for_event(event, &profiles, &users, &mut existing)
+                .await?;
         }
         Ok(())
     }

@@ -6,8 +6,8 @@ use utoipa::{IntoParams, ToSchema};
 use crate::auth::extractor::{ensure_roles, AuthUser};
 use crate::error::{AppError, AppResult};
 use crate::models::club::{
-    AssignedAthleteBrief, AthleteCalendarEvent, CalendarEvent, EventWithdrawal, LogLevel,
-    PublicCalendarEvent, TrainingScheduleDefaults, WithdrawalStatus,
+    AssignedAthleteBrief, AthleteCalendarEvent, AthleteProfile, AttendanceRecord, CalendarEvent,
+    EventWithdrawal, LogLevel, PublicCalendarEvent, TrainingScheduleDefaults, WithdrawalStatus,
 };
 use crate::models::role::Role;
 use crate::models::user::{ErrorBody, OkResponse};
@@ -143,21 +143,17 @@ fn to_public(e: &CalendarEvent) -> PublicCalendarEvent {
     }
 }
 
-async fn to_athlete_view(
+fn to_athlete_view(
     state: &AppState,
     e: &CalendarEvent,
     user_id: &str,
-) -> AppResult<AthleteCalendarEvent> {
-    let profiles = state.db.list_profiles().await?;
-    let my_ids: Vec<String> = profiles
-        .iter()
-        .filter(|p| p.user_id == user_id)
-        .map(|p| p.id.clone())
-        .collect();
-
+    my_ids: &[String],
+    profiles: &[AthleteProfile],
+    attendance: &[AttendanceRecord],
+) -> AthleteCalendarEvent {
     let i_am_assigned = state
         .db
-        .athlete_is_effectively_assigned(e, &my_ids, user_id);
+        .athlete_is_effectively_assigned(e, my_ids, user_id);
 
     let my_withdrawal_status = e
         .withdrawals
@@ -170,21 +166,9 @@ async fn to_athlete_view(
             WithdrawalStatus::Rejected => "rejected".to_string(),
         });
 
-    // Skład = wszystkie profile zawodników (także bez konta), nie konta z rolą zawodnik
-    let assigned_athletes = if e.all_athletes {
-        profiles
-            .iter()
-            .filter(|p| {
-                !e.withdrawals.iter().any(|w| {
-                    w.status == WithdrawalStatus::Accepted && w.athlete_id == p.id
-                })
-            })
-            .map(|p| AssignedAthleteBrief {
-                id: p.id.clone(),
-                display_name: p.display_name.clone(),
-            })
-            .collect()
-    } else {
+    // Treningi all_athletes — bez pełnej listy w DTO (UI i tak nie pokazuje składu).
+    // Zawody — tylko ogłoszony skład.
+    let assigned_athletes = if e.event_type == "zawody" && !e.all_athletes {
         e.assigned_athlete_ids
             .iter()
             .filter_map(|id| profiles.iter().find(|p| p.id == *id))
@@ -193,20 +177,22 @@ async fn to_athlete_view(
                 display_name: p.display_name.clone(),
             })
             .collect()
+    } else {
+        Vec::new()
     };
 
-    let roster_announced = e.event_type != "zawody" || !e.assigned_athlete_ids.is_empty() || e.all_athletes;
+    let roster_announced =
+        e.event_type != "zawody" || !e.assigned_athlete_ids.is_empty() || e.all_athletes;
 
     let attendance_status = if e.event_type == "trening" {
-        let records = state.db.list_attendance_raw().await?;
-        records
-            .into_iter()
+        attendance
+            .iter()
             .find(|r| {
                 r.user_id == user_id
                     && r.event_id.as_deref() == Some(e.id.as_str())
                     && (r.status == "present" || r.status == "absent")
             })
-            .map(|r| r.status)
+            .map(|r| r.status.clone())
             .or_else(|| {
                 if my_withdrawal_status.as_deref() == Some("accepted") {
                     Some("withdrawn".into())
@@ -218,7 +204,7 @@ async fn to_athlete_view(
         None
     };
 
-    Ok(AthleteCalendarEvent {
+    AthleteCalendarEvent {
         id: e.id.clone(),
         title: e.title.clone(),
         event_type: e.event_type.clone(),
@@ -236,7 +222,7 @@ async fn to_athlete_view(
         roster_announced,
         my_withdrawal_status,
         attendance_status,
-    })
+    }
 }
 
 #[utoipa::path(
@@ -303,8 +289,11 @@ pub async fn list_my_events(
         &auth,
         &[Role::Zawodnik, Role::Trener, Role::Admin],
     )?;
-    // Auto-nieobecność przed zbudowaniem widoku (jak przy GET /api/attendance)
-    let _ = state.db.reconcile_past_training_attendance().await;
+    // Tylko niedawne treningi — pełne historyczne reconcile nie blokuje kalendarza.
+    let _ = state
+        .db
+        .reconcile_past_training_attendance_since_days(21)
+        .await;
 
     let profiles = state.db.list_profiles().await?;
     let my_ids: Vec<String> = profiles
@@ -312,23 +301,33 @@ pub async fn list_my_events(
         .filter(|p| p.user_id == auth.user.id)
         .map(|p| p.id.clone())
         .collect();
+    let attendance = state.db.list_attendance_raw().await?;
 
     let events = state
         .db
         .list_events_in_range(query.from.as_deref(), query.to.as_deref())
         .await?;
 
-    let mut out = Vec::new();
-    for e in events {
-        let visible = e.club_assigned
-            || my_ids
-                .iter()
-                .any(|id| e.assigned_athlete_ids.contains(id));
-        if !visible {
-            continue;
-        }
-        out.push(to_athlete_view(&state, &e, &auth.user.id).await?);
-    }
+    let out: Vec<AthleteCalendarEvent> = events
+        .into_iter()
+        .filter(|e| {
+            e.club_assigned
+                || e.all_athletes
+                || my_ids
+                    .iter()
+                    .any(|id| e.assigned_athlete_ids.contains(id))
+        })
+        .map(|e| {
+            to_athlete_view(
+                &state,
+                &e,
+                &auth.user.id,
+                &my_ids,
+                &profiles,
+                &attendance,
+            )
+        })
+        .collect();
     Ok(Json(out))
 }
 
