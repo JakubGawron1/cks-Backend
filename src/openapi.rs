@@ -25,7 +25,7 @@ impl Modify for SecurityAddon {
 #[openapi(
     info(
         title = "CKS Slavia API",
-        version = "0.1.0",
+        version = "1.0.0",
         description = "API panelu klubowego CKS Slavia Ruda Śląska"
     ),
     modifiers(&SecurityAddon),
@@ -43,6 +43,13 @@ impl Modify for SecurityAddon {
         ResultStatus,
         AttendanceSession,
         AttendanceRecord,
+        CalendarEvent,
+        EventWithdrawal,
+        WithdrawalStatus,
+        TrainingScheduleDefaults,
+        PublicCalendarEvent,
+        AssignedAthleteBrief,
+        AthleteCalendarEvent,
         PlanExercise,
         TrainingPlan,
         PlanProgressEntry,

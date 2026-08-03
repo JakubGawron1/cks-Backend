@@ -45,6 +45,10 @@ pub async fn list_public_flags(State(state): State<AppState>) -> AppResult<Json<
     const PUBLIC_FLAG_KEYS: &[&str] = &[
         "public_blog",
         "announcements_board",
+        "public_calendar",
+        "club_calendar",
+        "athlete_calendar",
+        "ui_toasts",
         "experimental_panel_themes",
     ];
 

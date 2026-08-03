@@ -157,6 +157,28 @@ pub fn openapi_router() -> OpenApiRouter<AppState> {
             handlers::attendance::list_attendance,
             handlers::attendance::check_in
         ))
+        .routes(routes!(handlers::attendance::approve_attendance))
+        .routes(routes!(handlers::attendance::reject_attendance))
+        .routes(routes!(
+            handlers::events::list_events,
+            handlers::events::create_event
+        ))
+        .routes(routes!(handlers::events::list_public_events))
+        .routes(routes!(handlers::events::list_my_events))
+        .routes(routes!(
+            handlers::events::get_schedule,
+            handlers::events::update_schedule
+        ))
+        .routes(routes!(
+            handlers::events::update_event,
+            handlers::events::delete_event
+        ))
+        .routes(routes!(handlers::events::cancel_event))
+        .routes(routes!(handlers::events::restore_event))
+        .routes(routes!(handlers::events::withdraw_from_event))
+        .routes(routes!(handlers::events::accept_withdrawal))
+        .routes(routes!(handlers::events::reject_withdrawal))
+        .routes(routes!(handlers::events::clear_withdrawal))
         .routes(routes!(
             handlers::plans::list_plans,
             handlers::plans::create_plan

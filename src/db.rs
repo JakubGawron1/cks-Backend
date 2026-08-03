@@ -10,9 +10,10 @@ use crate::auth::password::{hash_password, verify_password};
 use crate::config::Config;
 use crate::error::{internal, AppError, AppResult};
 use crate::models::club::{
-    AthleteProfile, AthleteStats, AttendanceRecord, AttendanceSession, CmsBlock, CmsPage, CmsStatus,
-    CompetitionResult, ContactMessage, FeatureFlag, FlagKind, FlagRolloutStatus, LogLevel,
-    Notification, ResultStatus, SiteStats, SystemLog, TrainingPlan, TrainingPlanProgress,
+    AthleteProfile, AthleteStats, AttendanceRecord, AttendanceSession, CalendarEvent, CmsBlock,
+    CmsPage, CmsStatus, CompetitionResult, ContactMessage, FeatureFlag, FlagKind,
+    FlagRolloutStatus, LogLevel, Notification, ResultStatus, SiteStats, SystemLog,
+    TrainingPlan, TrainingPlanProgress, TrainingScheduleDefaults, WithdrawalStatus,
 };
 use crate::models::role::{has_role, roles_from_json, roles_to_json, Role};
 use crate::models::user::UserRecord;
@@ -29,6 +30,7 @@ pub const MANAGED_TABLES: &[&str] = &[
     "plan_progress",
     "contact_messages",
     "notifications",
+    "calendar_events",
     "meta",
 ];
 
@@ -327,9 +329,14 @@ impl Database {
                 label: "Trening".into(),
                 created_at: now.clone(),
                 refreshed_at: now,
+                event_id: None,
             })
             .await?;
         }
+
+        self.ensure_training_schedule_defaults().await?;
+        self.seed_training_events().await?;
+        let _ = self.reconcile_past_training_attendance().await;
 
         Ok(())
     }
@@ -579,6 +586,38 @@ impl Database {
                 true,
             ),
             (
+                "public_calendar",
+                "Kalendarz publiczny",
+                FlagKind::Stable,
+                "Publiczny kalendarz klubowy na witrynie (`/kalendarz`) — linki w nawigacji i stopce.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "club_calendar",
+                "Kalendarz kadrowy",
+                FlagKind::Stable,
+                "Kalendarz zawodów i treningów w panelu klubowym (`/klub/kalendarz`) — CRUD, skład, terminarz.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "athlete_calendar",
+                "Kalendarz zawodnika",
+                FlagKind::Stable,
+                "Kalendarz w panelu zawodnika (`/panel/kalendarz`) — skład, rezygnacje, obecność.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "ui_toasts",
+                "Powiadomienia toast",
+                FlagKind::Stable,
+                "Globalne powiadomienia toast (prawy dolny róg) po akcjach w panelach i na witrynie — sukces, błąd, info.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
                 "experimental_live_scores",
                 "Live wyniki (eksperymentalne)",
                 FlagKind::Experimental,
@@ -816,7 +855,34 @@ impl Database {
 
     // --- logs ---
 
+    /// Logi systemowe trzymane są maksymalnie 7 dni.
+    const SYSTEM_LOG_RETENTION_DAYS: i64 = 7;
+
+    pub async fn purge_old_system_logs(&self) -> AppResult<usize> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(Self::SYSTEM_LOG_RETENTION_DAYS);
+        let all: Vec<SystemLog> = self.kv_list("system_logs").await?;
+        let mut deleted = 0usize;
+        for log in all {
+            let too_old = chrono::DateTime::parse_from_rfc3339(&log.created_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc) < cutoff)
+                .unwrap_or(true);
+            if too_old {
+                self.kv_delete("system_logs", &log.id).await?;
+                deleted += 1;
+            }
+        }
+        if deleted > 0 {
+            tracing::info!(
+                deleted,
+                retention_days = Self::SYSTEM_LOG_RETENTION_DAYS,
+                "usunięto stare logi systemowe"
+            );
+        }
+        Ok(deleted)
+    }
+
     pub async fn list_logs(&self, limit: usize) -> AppResult<Vec<SystemLog>> {
+        self.purge_old_system_logs().await?;
         let mut logs: Vec<SystemLog> = self.kv_list( "system_logs").await?;
         logs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         logs.truncate(limit);
@@ -850,7 +916,9 @@ impl Database {
             actor_id: actor_id.map(|s| s.to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
         };
-        self.kv_upsert( "system_logs", &log.id, &log).await
+        self.kv_upsert( "system_logs", &log.id, &log).await?;
+        self.purge_old_system_logs().await?;
+        Ok(())
     }
 
     // --- stats ---
@@ -904,11 +972,44 @@ impl Database {
             .into_iter()
             .find(|p| p.user_id == user_id);
 
+        let accepted: Vec<_> = mine
+            .iter()
+            .filter(|r| r.status == ResultStatus::Accepted)
+            .collect();
+        let competition_accepted: Vec<_> = accepted
+            .iter()
+            .filter(|r| r.kind.eq_ignore_ascii_case("competition"))
+            .collect();
+
+        let best_snatch_kg = accepted
+            .iter()
+            .filter_map(|r| r.snatch_kg)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.max(v)))
+            });
+        let best_clean_jerk_kg = accepted
+            .iter()
+            .filter_map(|r| r.clean_jerk_kg)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.max(v)))
+            });
+        let best_total_kg = accepted
+            .iter()
+            .filter_map(|r| {
+                r.total_kg.or_else(|| match (r.snatch_kg, r.clean_jerk_kg) {
+                    (Some(s), Some(c)) => Some(s + c),
+                    _ => None,
+                })
+            })
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map_or(v, |a| a.max(v)))
+            });
+
         Ok(AthleteStats {
-            results_accepted: mine
-                .iter()
-                .filter(|r| r.status == ResultStatus::Accepted)
-                .count(),
+            results_accepted: accepted.len(),
             results_pending: mine
                 .iter()
                 .filter(|r| r.status == ResultStatus::Pending)
@@ -923,6 +1024,10 @@ impl Database {
             plans_completed_exercises: completed,
             bodyweight_kg: profile.as_ref().and_then(|p| p.bodyweight_kg),
             category: profile.and_then(|p| p.category),
+            best_snatch_kg,
+            best_clean_jerk_kg,
+            best_total_kg,
+            starts_count: competition_accepted.len(),
         })
     }
 
@@ -937,8 +1042,29 @@ impl Database {
         self.upsert_meta("attendance_session", &payload).await
     }
 
+    /// Odczyt stałej sesji QR — seed przy pierwszym GET, bez rotacji tokenu.
+    pub async fn ensure_attendance_session(&self) -> AppResult<AttendanceSession> {
+        if let Some(session) = self.get_attendance_session().await? {
+            return Ok(session);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let session = AttendanceSession {
+            token: uuid::Uuid::new_v4().to_string(),
+            label: "Trening klubowy".into(),
+            created_at: now.clone(),
+            refreshed_at: now,
+            event_id: None,
+        };
+        self.set_attendance_session(session.clone()).await?;
+        Ok(session)
+    }
+
     pub async fn list_attendance_raw(&self) -> AppResult<Vec<AttendanceRecord>> {
         self.kv_list( "attendance").await
+    }
+
+    pub async fn get_attendance_record(&self, id: &str) -> AppResult<Option<AttendanceRecord>> {
+        self.kv_get("attendance", id).await
     }
 
     pub async fn list_attendance_in_window(&self) -> AppResult<Vec<AttendanceRecord>> {
@@ -983,6 +1109,8 @@ impl Database {
         display_name: &str,
         token: &str,
     ) -> AppResult<AttendanceRecord> {
+        const NO_TRAINING_MSG: &str = "Dziś nie ma treningu w tym terminie.";
+
         let session = self
             .get_attendance_session()
             .await?
@@ -993,16 +1121,91 @@ impl Database {
             ));
         }
 
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let already = self
-            .list_attendance_in_window()
-            .await?
-            .into_iter()
-            .any(|r| r.user_id == user_id && r.checked_at.starts_with(&today));
-        if already {
-            return Err(AppError::BadRequest(
-                "Obecność na dziś jest już zapisana.".into(),
-            ));
+        let defaults = self.get_training_schedule_defaults().await?;
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let today_training = self.find_today_scheduled_training(&today).await?;
+
+        let profiles = self.list_profiles().await?;
+        let my_profile_ids: Vec<String> = profiles
+            .iter()
+            .filter(|p| p.user_id == user_id)
+            .map(|p| p.id.clone())
+            .collect();
+
+        // Autoryzowana ścieżka: trening dnia + okno czasowe
+        if let Some(ref event) = today_training {
+            if attendance_window_open(event, &defaults) {
+                if self.athlete_has_accepted_withdrawal(event, &my_profile_ids, user_id) {
+                    return Err(AppError::BadRequest(
+                        "Zrezygnowałeś z tego treningu — check-in niedostępny.".into(),
+                    ));
+                }
+                if !self.athlete_is_effectively_assigned(event, &my_profile_ids, user_id) {
+                    return Err(AppError::BadRequest(
+                        "Nie jesteś na liście uczestników tego treningu.".into(),
+                    ));
+                }
+
+                let existing = self.list_attendance_raw().await?;
+                if existing.iter().any(|r| {
+                    r.user_id == user_id
+                        && r.event_id.as_deref() == Some(event.id.as_str())
+                        && r.status == "present"
+                }) {
+                    return Err(AppError::BadRequest(
+                        "Obecność na tym treningu jest już zapisana.".into(),
+                    ));
+                }
+
+                // Usuń auto-absent / pending / rejected dla tego eventu
+                for r in existing.iter().filter(|r| {
+                    r.user_id == user_id && r.event_id.as_deref() == Some(event.id.as_str())
+                }) {
+                    self.kv_delete("attendance", &r.id).await?;
+                }
+
+                let record = AttendanceRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    user_id: user_id.into(),
+                    display_name: display_name.into(),
+                    checked_at: chrono::Utc::now().to_rfc3339(),
+                    session_token: token.into(),
+                    event_id: Some(event.id.clone()),
+                    status: "present".into(),
+                    source: "qr".into(),
+                };
+                self.upsert_attendance(record.clone()).await?;
+                self.prune_attendance_outside_window().await?;
+                return Ok(record);
+            }
+        }
+
+        // Poza oknem / brak treningu — ten sam komunikat dla zawodnika + cichy pending
+        let event_id = today_training.as_ref().map(|e| e.id.clone());
+        let existing = self.list_attendance_raw().await?;
+        let already_pending = existing.iter().any(|r| {
+            r.user_id == user_id
+                && r.status == "pending_unauthorized"
+                && match (&event_id, &r.event_id) {
+                    (Some(a), Some(b)) => a == b,
+                    (None, None) => r.checked_at.starts_with(&today),
+                    _ => false,
+                }
+        });
+        if already_pending {
+            return Err(AppError::BadRequest(NO_TRAINING_MSG.into()));
+        }
+        // Już present na tym evencie (np. wcześniejszy skan) — nie twórz pending
+        if let Some(ref eid) = event_id {
+            if existing.iter().any(|r| {
+                r.user_id == user_id
+                    && r.event_id.as_deref() == Some(eid.as_str())
+                    && r.status == "present"
+            }) {
+                return Err(AppError::BadRequest(
+                    "Obecność na tym treningu jest już zapisana.".into(),
+                ));
+            }
         }
 
         let record = AttendanceRecord {
@@ -1011,10 +1214,443 @@ impl Database {
             display_name: display_name.into(),
             checked_at: chrono::Utc::now().to_rfc3339(),
             session_token: token.into(),
+            event_id: event_id.clone(),
+            status: "pending_unauthorized".into(),
+            source: "qr".into(),
         };
+        self.upsert_attendance(record).await?;
+
+        let body = match today_training.as_ref() {
+            Some(e) => format!(
+                "{} zeskanował QR poza oknem treningu „{}” ({})",
+                display_name, e.title, e.date
+            ),
+            None => format!(
+                "{} zeskanował QR w dniu bez treningu ({})",
+                display_name, today
+            ),
+        };
+        let _ = self
+            .notify_staff(
+                "Nieautoryzowany skan obecności",
+                &body,
+                "attendance",
+                Some("/klub/obecnosc"),
+                Some(user_id),
+            )
+            .await;
+
+        Err(AppError::BadRequest(NO_TRAINING_MSG.into()))
+    }
+
+    async fn find_today_scheduled_training(
+        &self,
+        today: &str,
+    ) -> AppResult<Option<CalendarEvent>> {
+        Ok(self
+            .list_events()
+            .await?
+            .into_iter()
+            .find(|e| {
+                e.event_type == "trening" && e.status == "scheduled" && e.date == today
+            }))
+    }
+
+    pub async fn approve_unauthorized_attendance(
+        &self,
+        id: &str,
+        event_id_override: Option<&str>,
+    ) -> AppResult<AttendanceRecord> {
+        let mut record = self
+            .get_attendance_record(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Rekord obecności nie istnieje.".into()))?;
+        if record.status != "pending_unauthorized" {
+            return Err(AppError::BadRequest(
+                "Można zaakceptować tylko oczekujące nieautoryzowane skany.".into(),
+            ));
+        }
+
+        let event_id = event_id_override
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| record.event_id.clone())
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "Wybierz trening, do którego przypisać obecność.".into(),
+                )
+            })?;
+
+        let event = self
+            .get_event(&event_id)
+            .await?
+            .ok_or_else(|| AppError::BadRequest("Nie znaleziono treningu.".into()))?;
+        if event.event_type != "trening" {
+            return Err(AppError::BadRequest(
+                "Obecność można powiązać tylko z treningiem.".into(),
+            ));
+        }
+
+        // Usuń inne wpisy tego zawodnika dla eventu (absent/pending)
+        let existing = self.list_attendance_raw().await?;
+        for r in existing.iter().filter(|r| {
+            r.id != record.id
+                && r.user_id == record.user_id
+                && r.event_id.as_deref() == Some(event_id.as_str())
+        }) {
+            self.kv_delete("attendance", &r.id).await?;
+        }
+
+        record.event_id = Some(event_id);
+        record.status = "present".into();
+        record.source = "manual".into();
+        record.checked_at = chrono::Utc::now().to_rfc3339();
         self.upsert_attendance(record.clone()).await?;
-        self.prune_attendance_outside_window().await?;
         Ok(record)
+    }
+
+    pub async fn reject_unauthorized_attendance(
+        &self,
+        id: &str,
+    ) -> AppResult<AttendanceRecord> {
+        let mut record = self
+            .get_attendance_record(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Rekord obecności nie istnieje.".into()))?;
+        if record.status != "pending_unauthorized" {
+            return Err(AppError::BadRequest(
+                "Można odrzucić tylko oczekujące nieautoryzowane skany.".into(),
+            ));
+        }
+        record.status = "rejected".into();
+        self.upsert_attendance(record.clone()).await?;
+        Ok(record)
+    }
+
+    // --- calendar events ---
+
+    pub async fn list_events(&self) -> AppResult<Vec<CalendarEvent>> {
+        let mut items: Vec<CalendarEvent> = self.kv_list("calendar_events").await?;
+        items.sort_by(|a, b| {
+            a.date
+                .cmp(&b.date)
+                .then(a.time.as_deref().unwrap_or("").cmp(b.time.as_deref().unwrap_or("")))
+        });
+        Ok(items)
+    }
+
+    pub async fn get_event(&self, id: &str) -> AppResult<Option<CalendarEvent>> {
+        self.kv_get("calendar_events", id).await
+    }
+
+    pub async fn upsert_event(&self, event: CalendarEvent) -> AppResult<()> {
+        self.kv_upsert("calendar_events", &event.id, &event).await
+    }
+
+    pub async fn delete_event(&self, id: &str) -> AppResult<()> {
+        self.kv_delete("calendar_events", id).await
+    }
+
+    pub async fn list_events_in_range(
+        &self,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> AppResult<Vec<CalendarEvent>> {
+        Ok(self
+            .list_events()
+            .await?
+            .into_iter()
+            .filter(|e| {
+                let end = e.end_date_inclusive();
+                if let Some(f) = from {
+                    if end < f {
+                        return false;
+                    }
+                }
+                if let Some(t) = to {
+                    if e.date.as_str() > t {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect())
+    }
+
+    pub async fn list_public_events(
+        &self,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> AppResult<Vec<CalendarEvent>> {
+        Ok(self
+            .list_events_in_range(from, to)
+            .await?
+            .into_iter()
+            .filter(|e| e.club_assigned)
+            .collect())
+    }
+
+    pub async fn get_training_schedule_defaults(&self) -> AppResult<TrainingScheduleDefaults> {
+        let raw: Option<String> = self.kv_get_raw("meta", "calendar_training_defaults").await?;
+        if let Some(s) = raw {
+            if let Ok(parsed) = serde_json::from_str::<TrainingScheduleDefaults>(&s) {
+                return Ok(parsed);
+            }
+        }
+        Ok(TrainingScheduleDefaults::default())
+    }
+
+    pub async fn set_training_schedule_defaults(
+        &self,
+        defaults: &TrainingScheduleDefaults,
+    ) -> AppResult<()> {
+        let payload = serde_json::to_string(defaults).map_err(internal)?;
+        self.upsert_meta("calendar_training_defaults", &payload).await
+    }
+
+    pub async fn ensure_training_schedule_defaults(&self) -> AppResult<()> {
+        let raw: Option<String> = self.kv_get_raw("meta", "calendar_training_defaults").await?;
+        if raw.is_none() {
+            self.set_training_schedule_defaults(&TrainingScheduleDefaults::default())
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn get_training_skip_dates(&self) -> AppResult<Vec<String>> {
+        let raw: Option<String> = self.kv_get_raw("meta", "calendar_training_skip_dates").await?;
+        if let Some(s) = raw {
+            if let Ok(v) = serde_json::from_str::<Vec<String>>(&s) {
+                return Ok(v);
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    async fn set_training_skip_dates(&self, dates: &[String]) -> AppResult<()> {
+        let payload = serde_json::to_string(dates).map_err(internal)?;
+        self.upsert_meta("calendar_training_skip_dates", &payload).await
+    }
+
+    pub async fn add_training_skip_date(&self, date: &str) -> AppResult<()> {
+        let mut dates = self.get_training_skip_dates().await?;
+        if !dates.iter().any(|d| d == date) {
+            dates.push(date.to_string());
+            self.set_training_skip_dates(&dates).await?;
+        }
+        Ok(())
+    }
+
+    /// Seed / dociągnięcie treningów wg harmonogramu (od dziś, ~3 miesiące).
+    pub async fn seed_training_events(&self) -> AppResult<usize> {
+        self.ensure_training_schedule_defaults().await?;
+        let defaults = self.get_training_schedule_defaults().await?;
+        let skip = self.get_training_skip_dates().await?;
+        let existing = self.list_events().await?;
+        let existing_trening_dates: std::collections::HashSet<String> = existing
+            .iter()
+            .filter(|e| e.event_type == "trening")
+            .map(|e| e.date.clone())
+            .collect();
+
+        let today = chrono::Local::now().date_naive();
+        let horizon = today + chrono::Duration::days(92);
+        let mut created = 0usize;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let mut day = today;
+        while day <= horizon {
+            use chrono::Datelike;
+            let iso_weekday = day.weekday().number_from_monday() as u8;
+            if defaults.weekdays.contains(&iso_weekday) {
+                let date_key = day.format("%Y-%m-%d").to_string();
+                if !skip.iter().any(|d| d == &date_key)
+                    && !existing_trening_dates.contains(&date_key)
+                {
+                    let event = CalendarEvent {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        title: defaults.title.clone(),
+                        event_type: "trening".into(),
+                        date: date_key,
+                        end_date: None,
+                        time: Some(defaults.time.clone()),
+                        location: Some(defaults.location.clone()),
+                        description: None,
+                        status: "scheduled".into(),
+                        cancellation_note: None,
+                        club_assigned: true,
+                        source: "seeded".into(),
+                        locked: false,
+                        all_athletes: true,
+                        assigned_athlete_ids: vec![],
+                        withdrawals: vec![],
+                        created_by: "system".into(),
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    };
+                    self.upsert_event(event).await?;
+                    created += 1;
+                }
+            }
+            day += chrono::Duration::days(1);
+        }
+
+        let until = horizon.format("%Y-%m-%d").to_string();
+        self.upsert_meta("calendar_trainings_seeded_until", &until)
+            .await?;
+        if created > 0 {
+            tracing::info!(created, "seed: treningi kalendarza");
+        }
+        Ok(created)
+    }
+
+    /// Po zmianie weekdays: usuń przyszłe seeded !locked poza nowym harmonogramem.
+    pub async fn prune_seeded_trainings_outside_schedule(
+        &self,
+        defaults: &TrainingScheduleDefaults,
+    ) -> AppResult<usize> {
+        let today = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let events = self.list_events().await?;
+        let mut removed = 0usize;
+        for e in events {
+            if e.event_type != "trening" || e.source != "seeded" || e.locked {
+                continue;
+            }
+            if e.date.as_str() < today.as_str() {
+                continue;
+            }
+            let Ok(naive) = chrono::NaiveDate::parse_from_str(&e.date, "%Y-%m-%d") else {
+                continue;
+            };
+            use chrono::Datelike;
+            let wd = naive.weekday().number_from_monday() as u8;
+            if !defaults.weekdays.contains(&wd) {
+                self.delete_event(&e.id).await?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    pub fn athlete_has_accepted_withdrawal(
+        &self,
+        event: &CalendarEvent,
+        profile_ids: &[String],
+        user_id: &str,
+    ) -> bool {
+        event.withdrawals.iter().any(|w| {
+            w.status == WithdrawalStatus::Accepted
+                && (profile_ids.contains(&w.athlete_id)
+                    || w.user_id.as_deref() == Some(user_id))
+        })
+    }
+
+    pub fn athlete_is_effectively_assigned(
+        &self,
+        event: &CalendarEvent,
+        profile_ids: &[String],
+        user_id: &str,
+    ) -> bool {
+        if self.athlete_has_accepted_withdrawal(event, profile_ids, user_id) {
+            return false;
+        }
+        if event.all_athletes {
+            return true;
+        }
+        profile_ids
+            .iter()
+            .any(|pid| event.assigned_athlete_ids.contains(pid))
+    }
+
+    /// Po zamknięciu okna treningu oznacza nieobecnych.
+    pub async fn reconcile_attendance_for_event(&self, event_id: &str) -> AppResult<usize> {
+        let event = match self.get_event(event_id).await? {
+            Some(e) => e,
+            None => return Ok(0),
+        };
+        if event.event_type != "trening" || event.status != "scheduled" {
+            return Ok(0);
+        }
+
+        let defaults = self.get_training_schedule_defaults().await?;
+        if !attendance_window_closed(&event, &defaults) {
+            return Ok(0);
+        }
+
+        let profiles = self.list_profiles().await?;
+        let users = self.list_users().await?;
+        let existing = self.list_attendance_raw().await?;
+        let mut created = 0usize;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for profile in &profiles {
+            if profile.user_id == "manual" || profile.user_id.is_empty() {
+                continue;
+            }
+            let user = users.iter().find(|u| u.id == profile.user_id);
+            if let Some(u) = user {
+                if !u.is_active || !u.roles.iter().any(|r| *r == Role::Zawodnik) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            let profile_ids = vec![profile.id.clone()];
+            if self.athlete_has_accepted_withdrawal(&event, &profile_ids, &profile.user_id) {
+                continue;
+            }
+            if !event.all_athletes
+                && !event.assigned_athlete_ids.contains(&profile.id)
+            {
+                continue;
+            }
+
+            let has_present = existing.iter().any(|r| {
+                r.user_id == profile.user_id
+                    && r.event_id.as_deref() == Some(event_id)
+                    && r.status == "present"
+            });
+            if has_present {
+                continue;
+            }
+            let has_terminal = existing.iter().any(|r| {
+                r.user_id == profile.user_id
+                    && r.event_id.as_deref() == Some(event_id)
+                    && (r.status == "absent"
+                        || r.status == "pending_unauthorized"
+                        || r.status == "rejected")
+            });
+            if has_terminal {
+                continue;
+            }
+
+            let record = AttendanceRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: profile.user_id.clone(),
+                display_name: profile.display_name.clone(),
+                checked_at: now.clone(),
+                session_token: String::new(),
+                event_id: Some(event_id.to_string()),
+                status: "absent".into(),
+                source: "auto".into(),
+            };
+            self.upsert_attendance(record).await?;
+            created += 1;
+        }
+        Ok(created)
+    }
+
+    pub async fn reconcile_past_training_attendance(&self) -> AppResult<()> {
+        let defaults = self.get_training_schedule_defaults().await?;
+        let events = self.list_events().await?;
+        for e in events {
+            if e.event_type == "trening" && e.status == "scheduled" && attendance_window_closed(&e, &defaults)
+            {
+                let _ = self.reconcile_attendance_for_event(&e.id).await?;
+            }
+        }
+        Ok(())
     }
 
     // --- training plans ---
@@ -1118,6 +1754,7 @@ impl Database {
                 let items: Vec<Notification> = self.kv_list( "notifications").await?;
                 values_from_list(items)
             }
+            "calendar_events" => values_from_list(self.list_events().await?),
             "meta" => self.list_meta_raw().await,
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
         }
@@ -1158,6 +1795,11 @@ impl Database {
                     .map_err(|e| AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}")))?;
                 self.upsert_attendance(rec).await
             }
+            "calendar_events" => {
+                let event: CalendarEvent = serde_json::from_value(row)
+                    .map_err(|e| AppError::BadRequest(format!("Nieprawidłowy wiersz: {e}")))?;
+                self.upsert_event(event).await
+            }
             "meta" => {
                 let key = row
                     .get("key")
@@ -1187,6 +1829,7 @@ impl Database {
             "competition_results" => self.kv_delete( "competition_results", id).await,
             "training_plans" => self.delete_plan(id).await,
             "attendance" => self.kv_delete( "attendance", id).await,
+            "calendar_events" => self.delete_event(id).await,
             "meta" => self.delete_meta(id).await,
             "users" => self.delete_user(id).await,
             "system_logs" => self.kv_delete( "system_logs", id).await,
@@ -1387,6 +2030,54 @@ fn attendance_window_bounds() -> (chrono::DateTime<chrono::Utc>, chrono::DateTim
     let start = year_start - Duration::days(62);
     let end = year_end + Duration::days(62);
     (start, end)
+}
+
+/// Czy okno skanowania (time–end_time ± buffer) już się zamknęło dla wydarzenia.
+fn attendance_window_closed(
+    event: &CalendarEvent,
+    defaults: &TrainingScheduleDefaults,
+) -> bool {
+    let Some((_, end)) = attendance_scan_window(event, defaults) else {
+        return false;
+    };
+    chrono::Local::now().naive_local() > end
+}
+
+/// Czy bieżący moment mieści się w oknie [time − buffer, end_time + buffer].
+fn attendance_window_open(
+    event: &CalendarEvent,
+    defaults: &TrainingScheduleDefaults,
+) -> bool {
+    let Some((start, end)) = attendance_scan_window(event, defaults) else {
+        return false;
+    };
+    let now = chrono::Local::now().naive_local();
+    now >= start && now <= end
+}
+
+fn attendance_scan_window(
+    event: &CalendarEvent,
+    defaults: &TrainingScheduleDefaults,
+) -> Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> {
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
+    let date = NaiveDate::parse_from_str(&event.date, "%Y-%m-%d").ok()?;
+    let start_hm = event
+        .time
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(defaults.time.as_str());
+    let end_hm = defaults.end_time.as_str();
+    let start_time = NaiveTime::parse_from_str(start_hm, "%H:%M")
+        .or_else(|_| NaiveTime::parse_from_str(start_hm, "%H:%M:%S"))
+        .unwrap_or_else(|_| NaiveTime::from_hms_opt(15, 0, 0).unwrap());
+    let end_time = NaiveTime::parse_from_str(end_hm, "%H:%M")
+        .or_else(|_| NaiveTime::parse_from_str(end_hm, "%H:%M:%S"))
+        .unwrap_or_else(|_| NaiveTime::from_hms_opt(18, 0, 0).unwrap());
+    let buffer = chrono::Duration::minutes(defaults.attendance_buffer_minutes as i64);
+    let start = NaiveDateTime::new(date, start_time) - buffer;
+    let end = NaiveDateTime::new(date, end_time) + buffer;
+    Some((start, end))
 }
 
 fn local_db_path(config: &Config) -> PathBuf {

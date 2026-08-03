@@ -70,6 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.migrate().await?;
     tracing::info!("seed / synchronizacja katalogów…");
     db.seed_if_empty(&config).await?;
+    let purged = db.purge_old_system_logs().await?;
+    if purged > 0 {
+        tracing::info!(purged, "startup: usunięto logi starsze niż 7 dni");
+    }
     tracing::info!("baza gotowa");
 
     let state = AppState {

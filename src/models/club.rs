@@ -112,6 +112,10 @@ pub struct AttendanceSession {
     pub label: String,
     pub created_at: String,
     pub refreshed_at: String,
+    /// Deprecated — stały QR klubowy nie jest powiązany z treningiem (trening rozwiązywany przy skanie).
+    #[serde(default)]
+    #[schema(deprecated)]
+    pub event_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -121,6 +125,164 @@ pub struct AttendanceRecord {
     pub display_name: String,
     pub checked_at: String,
     pub session_token: String,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    /// "present" | "absent" | "pending_unauthorized" | "rejected"
+    #[serde(default = "default_attendance_status")]
+    pub status: String,
+    /// "qr" | "auto" | "manual"
+    #[serde(default = "default_attendance_source")]
+    pub source: String,
+}
+
+fn default_attendance_status() -> String {
+    "present".into()
+}
+
+fn default_attendance_source() -> String {
+    "qr".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[schema(rename_all = "snake_case")]
+pub enum WithdrawalStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EventWithdrawal {
+    pub athlete_id: String,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    pub reason: String,
+    pub at: String,
+    pub status: WithdrawalStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub title: String,
+    /// "zawody" | "trening"
+    pub event_type: String,
+    /// YYYY-MM-DD — początek
+    pub date: String,
+    /// YYYY-MM-DD — koniec (włącznie). Brak / None = jednodniowe (`date`).
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub time: Option<String>,
+    #[serde(default)]
+    pub location: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// "scheduled" | "cancelled"
+    pub status: String,
+    #[serde(default)]
+    pub cancellation_note: Option<String>,
+    pub club_assigned: bool,
+    /// "seeded" | "manual"
+    pub source: String,
+    pub locked: bool,
+    /// true = wszyscy aktywni zawodnicy (treningi)
+    pub all_athletes: bool,
+    #[serde(default)]
+    pub assigned_athlete_ids: Vec<String>,
+    #[serde(default)]
+    pub withdrawals: Vec<EventWithdrawal>,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl CalendarEvent {
+    /// Koniec wydarzenia (włącznie) — dla jednodniowych równy `date`.
+    pub fn end_date_inclusive(&self) -> &str {
+        self.end_date
+            .as_deref()
+            .filter(|d| d.len() == 10)
+            .unwrap_or(self.date.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TrainingScheduleDefaults {
+    /// ISO weekdays 1=Mon … 7=Sun
+    pub weekdays: Vec<u8>,
+    pub time: String,
+    pub end_time: String,
+    pub location: String,
+    pub title: String,
+    pub attendance_buffer_minutes: u32,
+}
+
+impl Default for TrainingScheduleDefaults {
+    fn default() -> Self {
+        Self {
+            weekdays: vec![1, 3, 5],
+            time: "15:00".into(),
+            end_time: "18:00".into(),
+            location: "ul. Konopnickiej 13, Ruda Śląska".into(),
+            title: "Trening klubowy".into(),
+            attendance_buffer_minutes: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PublicCalendarEvent {
+    pub id: String,
+    pub title: String,
+    pub event_type: String,
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AssignedAthleteBrief {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AthleteCalendarEvent {
+    pub id: String,
+    pub title: String,
+    pub event_type: String,
+    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation_note: Option<String>,
+    pub club_assigned: bool,
+    pub all_athletes: bool,
+    pub assigned_athletes: Vec<AssignedAthleteBrief>,
+    pub i_am_assigned: bool,
+    pub roster_announced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub my_withdrawal_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attendance_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -175,6 +337,14 @@ pub struct AthleteStats {
     pub plans_completed_exercises: usize,
     pub bodyweight_kg: Option<f64>,
     pub category: Option<String>,
+    /// Najlepsze zaakceptowane rwanie (kg)
+    pub best_snatch_kg: Option<f64>,
+    /// Najlepszy zaakceptowany podrzut (kg)
+    pub best_clean_jerk_kg: Option<f64>,
+    /// Najlepszy zaakceptowany dwubój (kg)
+    pub best_total_kg: Option<f64>,
+    /// Liczba zaakceptowanych startów (wyniki z zawodów)
+    pub starts_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
