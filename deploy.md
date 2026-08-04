@@ -51,6 +51,11 @@ gh secret set HF_TOKEN
 | `FRONTEND_ORIGIN` | `https://slavia.vercel.app,http://localhost:3000` |
 | `SEED_SUPERADMIN_EMAIL` | Twój email |
 | `SEED_SUPERADMIN_PASSWORD` | silne hasło |
+| `BREVO_API_KEY` | klucz API [Brevo](https://app.brevo.com/settings/keys/api) (opcjonalnie) |
+| `EMAIL_FROM` | np. `Slavia <twoj@email.pl>` — adres zweryfikowany w Brevo → Senders |
+| `EMAIL_ENABLED` | `true` / `false` (bez zmiennej: w prod włączone gdy jest klucz) |
+
+**Brevo bez własnej domeny:** utwórz API key, zweryfikuj sender (zwykle e-mail konta Brevo) i ustaw `EMAIL_FROM` na ten adres. Pełna wysyłka z `noreply@domena.pl` wymaga domeny w Brevo → Domains.
 
 Alias URL: `TURSO_DATABASE_URL` (jeśli ustawisz zamiast `DATABASE_URL`).
 

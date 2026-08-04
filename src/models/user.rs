@@ -43,6 +43,31 @@ pub fn normalize_ui_theme(raw: &str) -> Option<String> {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Preferencje powiadomień e-mail (opt-out: brakujące = włączone).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct NotificationPrefs {
+    #[serde(default = "default_true")]
+    pub email_squad: bool,
+    #[serde(default = "default_true")]
+    pub email_training_plans: bool,
+    #[serde(default = "default_true")]
+    pub email_contact: bool,
+}
+
+impl Default for NotificationPrefs {
+    fn default() -> Self {
+        Self {
+            email_squad: true,
+            email_training_plans: true,
+            email_contact: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PublicUser {
     pub id: String,
@@ -57,6 +82,12 @@ pub struct PublicUser {
     /// Zdjęcie konta (dla zawodnika = zdjęcie profilu publicznego).
     #[serde(default)]
     pub photo_url: Option<String>,
+    #[serde(default)]
+    pub email_verified: bool,
+    #[serde(default)]
+    pub pending_email: Option<String>,
+    #[serde(default)]
+    pub notification_prefs: NotificationPrefs,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +100,9 @@ pub struct UserRecord {
     pub is_active: bool,
     pub ui_theme: String,
     pub photo_url: Option<String>,
+    pub email_verified: bool,
+    pub pending_email: Option<String>,
+    pub notification_prefs: NotificationPrefs,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -83,6 +117,9 @@ impl From<&UserRecord> for PublicUser {
             is_active: user.is_active,
             ui_theme: user.ui_theme.clone(),
             photo_url: user.photo_url.clone(),
+            email_verified: user.email_verified,
+            pending_email: user.pending_email.clone(),
+            notification_prefs: user.notification_prefs.clone(),
         }
     }
 }

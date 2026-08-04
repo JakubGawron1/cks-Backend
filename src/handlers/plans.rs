@@ -94,6 +94,18 @@ pub async fn create_plan(
         &format!("Utworzono plan {}", plan.title),
         Some(&auth.user.id),
     ).await?;
+    for uid in &plan.assigned_user_ids {
+        crate::mail::notify_user(
+            &state,
+            uid,
+            "Nowy plan treningowy",
+            &format!("Przypisano Cię do planu: {}", plan.title),
+            "training_plan",
+            Some("/panel/plany"),
+            crate::mail::EmailChannel::TrainingPlan,
+        )
+        .await;
+    }
     Ok(Json(plan))
 }
 
@@ -124,6 +136,7 @@ pub async fn update_plan(
         .db
         .get_plan(&id).await?
         .ok_or_else(|| AppError::NotFound("Plan nie istnieje.".into()))?;
+    let prev_assigned = existing.assigned_user_ids.clone();
     let plan = TrainingPlan {
         id: existing.id,
         title: body.title.trim().to_string(),
@@ -142,6 +155,20 @@ pub async fn update_plan(
         &format!("Zaktualizowano plan {}", plan.title),
         Some(&auth.user.id),
     ).await?;
+    for uid in &plan.assigned_user_ids {
+        if !prev_assigned.contains(uid) {
+            crate::mail::notify_user(
+                &state,
+                uid,
+                "Nowy plan treningowy",
+                &format!("Przypisano Cię do planu: {}", plan.title),
+                "training_plan",
+                Some("/panel/plany"),
+                crate::mail::EmailChannel::TrainingPlan,
+            )
+            .await;
+        }
+    }
     Ok(Json(plan))
 }
 

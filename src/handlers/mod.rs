@@ -14,3 +14,5 @@ pub mod contact;
 pub mod notifications;
 pub mod uploads;
 pub mod events;
+pub mod devices;
+pub mod debug;

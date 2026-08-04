@@ -16,7 +16,7 @@ use crate::models::club::{
     TrainingPlan, TrainingPlanProgress, TrainingScheduleDefaults, WithdrawalStatus,
 };
 use crate::models::role::{has_role, roles_from_json, roles_to_json, Role};
-use crate::models::user::UserRecord;
+use crate::models::user::{NotificationPrefs, UserRecord};
 
 pub const MANAGED_TABLES: &[&str] = &[
     "users",
@@ -30,7 +30,9 @@ pub const MANAGED_TABLES: &[&str] = &[
     "plan_progress",
     "contact_messages",
     "notifications",
+    "device_tokens",
     "calendar_events",
+    "email_tokens",
     "meta",
 ];
 
@@ -46,6 +48,12 @@ struct StoredUser {
     ui_theme: String,
     #[serde(default)]
     photo_url: Option<String>,
+    #[serde(default)]
+    email_verified: bool,
+    #[serde(default)]
+    pending_email: Option<String>,
+    #[serde(default)]
+    notification_prefs: NotificationPrefs,
     created_at: String,
     updated_at: String,
 }
@@ -64,6 +72,12 @@ impl From<StoredUser> for UserRecord {
             is_active: u.is_active,
             ui_theme,
             photo_url: normalize_optional_url(u.photo_url),
+            email_verified: u.email_verified,
+            pending_email: u.pending_email.and_then(|e| {
+                let t = e.trim().to_ascii_lowercase();
+                if t.is_empty() { None } else { Some(t) }
+            }),
+            notification_prefs: u.notification_prefs,
             created_at: u.created_at,
             updated_at: u.updated_at,
         }
@@ -81,10 +95,31 @@ impl From<&UserRecord> for StoredUser {
             is_active: u.is_active,
             ui_theme: u.ui_theme.clone(),
             photo_url: u.photo_url.clone(),
+            email_verified: u.email_verified,
+            pending_email: u.pending_email.clone(),
+            notification_prefs: u.notification_prefs.clone(),
             created_at: u.created_at.clone(),
             updated_at: u.updated_at.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailTokenPurpose {
+    Verify,
+    Reset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailToken {
+    pub id: String,
+    pub user_id: String,
+    pub purpose: EmailTokenPurpose,
+    pub token_hash: String,
+    pub target_email: String,
+    pub expires_at: String,
+    pub used_at: Option<String>,
 }
 
 fn normalize_optional_url(raw: Option<String>) -> Option<String> {
@@ -251,15 +286,20 @@ impl Database {
         if self.user_count().await? == 0 {
             tracing::info!("Baza pusta — tworzę konto seed superadmin");
             let now = chrono::Utc::now().to_rfc3339();
+            let email = config.seed_superadmin_email.clone();
+            let email_verified = true; // seed zawsze zweryfikowany
             self.insert_user(StoredUser {
                 id: uuid::Uuid::new_v4().to_string(),
-                email: config.seed_superadmin_email.clone(),
+                email,
                 password_hash: hash_password(&config.seed_superadmin_password)?,
                 display_name: "Superadmin".into(),
                 roles: roles_to_json(&[Role::Superadmin]),
                 is_active: true,
                 ui_theme: crate::models::user::default_ui_theme(),
                 photo_url: None,
+                email_verified,
+                pending_email: None,
+                notification_prefs: NotificationPrefs::default(),
                 created_at: now.clone(),
                 updated_at: now,
             })
@@ -416,15 +456,20 @@ impl Database {
         photo_url: Option<String>,
     ) -> AppResult<UserRecord> {
         let now = chrono::Utc::now().to_rfc3339();
+        let email = email.trim().to_ascii_lowercase();
+        let email_verified = crate::mail::is_dev_email(&email);
         let user = UserRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            email: email.trim().to_ascii_lowercase(),
+            email,
             password_hash: hash_password(password)?,
             display_name: display_name.trim().to_string(),
             roles,
             is_active: true,
             ui_theme: crate::models::user::default_ui_theme(),
             photo_url: normalize_optional_url(photo_url),
+            email_verified,
+            pending_email: None,
+            notification_prefs: NotificationPrefs::default(),
             created_at: now.clone(),
             updated_at: now,
         };
@@ -818,6 +863,40 @@ impl Database {
         Ok(notification)
     }
 
+    // --- device tokens (FCM) ---
+
+    pub async fn upsert_device_token(
+        &self,
+        user_id: &str,
+        token: &str,
+        platform: &str,
+    ) -> AppResult<crate::models::club::DeviceToken> {
+        let device = crate::models::club::DeviceToken {
+            token: token.to_string(),
+            user_id: user_id.to_string(),
+            platform: platform.to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        self.kv_upsert("device_tokens", token, &device).await?;
+        Ok(device)
+    }
+
+    pub async fn delete_device_token(&self, token: &str) -> AppResult<()> {
+        self.kv_delete("device_tokens", token).await
+    }
+
+    pub async fn list_devices_for_user(
+        &self,
+        user_id: &str,
+    ) -> AppResult<Vec<crate::models::club::DeviceToken>> {
+        let items: Vec<crate::models::club::DeviceToken> =
+            self.kv_list("device_tokens").await?;
+        Ok(items
+            .into_iter()
+            .filter(|d| d.user_id == user_id)
+            .collect())
+    }
+
     /// Powiadamia aktywnych użytkowników z rolami kadry (trener / admin / superadmin).
     pub async fn notify_staff(
         &self,
@@ -851,6 +930,44 @@ impl Database {
             count += 1;
         }
         Ok(count)
+    }
+
+    // --- email tokens ---
+
+    pub async fn upsert_email_token(&self, token: &EmailToken) -> AppResult<()> {
+        self.kv_upsert("email_tokens", &token.id, token).await
+    }
+
+    pub async fn find_email_token_by_hash(
+        &self,
+        token_hash: &str,
+        purpose: EmailTokenPurpose,
+    ) -> AppResult<Option<EmailToken>> {
+        let all: Vec<EmailToken> = self.kv_list("email_tokens").await?;
+        Ok(all.into_iter().find(|t| {
+            t.token_hash == token_hash && t.purpose == purpose && t.used_at.is_none()
+        }))
+    }
+
+    pub async fn invalidate_email_tokens_for_user(
+        &self,
+        user_id: &str,
+        purpose: EmailTokenPurpose,
+    ) -> AppResult<()> {
+        let all: Vec<EmailToken> = self.kv_list("email_tokens").await?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for mut t in all {
+            if t.user_id == user_id && t.purpose == purpose && t.used_at.is_none() {
+                t.used_at = Some(now.clone());
+                self.upsert_email_token(&t).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn mark_email_token_used(&self, mut token: EmailToken) -> AppResult<()> {
+        token.used_at = Some(chrono::Utc::now().to_rfc3339());
+        self.upsert_email_token(&token).await
     }
 
     // --- logs ---
@@ -1800,7 +1917,16 @@ impl Database {
                 let items: Vec<Notification> = self.kv_list( "notifications").await?;
                 values_from_list(items)
             }
+            "device_tokens" => {
+                let items: Vec<crate::models::club::DeviceToken> =
+                    self.kv_list("device_tokens").await?;
+                values_from_list(items)
+            }
             "calendar_events" => values_from_list(self.list_events().await?),
+            "email_tokens" => {
+                let items: Vec<EmailToken> = self.kv_list("email_tokens").await?;
+                values_from_list(items)
+            }
             "meta" => self.list_meta_raw().await,
             _ => Err(AppError::NotFound(format!("Nieznana tabela: {table}"))),
         }
@@ -1858,7 +1984,8 @@ impl Database {
                     .to_string();
                 self.upsert_meta(key, &value).await
             }
-            "users" | "system_logs" | "plan_progress" | "notifications" | "contact_messages" => {
+            "users" | "system_logs" | "plan_progress" | "notifications" | "contact_messages"
+            | "device_tokens" | "email_tokens" => {
                 Err(AppError::Forbidden(
                     "Edycja tej tabeli tylko przez dedykowane API.".into(),
                 ))

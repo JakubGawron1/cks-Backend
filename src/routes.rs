@@ -104,6 +104,10 @@ pub fn openapi_router() -> OpenApiRouter<AppState> {
             crate::auth::handlers::me,
             crate::auth::handlers::update_me
         ))
+        .routes(routes!(crate::auth::handlers::request_email_verification))
+        .routes(routes!(crate::auth::handlers::confirm_email))
+        .routes(routes!(crate::auth::handlers::forgot_password))
+        .routes(routes!(crate::auth::handlers::reset_password))
         .routes(routes!(
             handlers::users::list_users,
             handlers::users::create_user
@@ -148,6 +152,7 @@ pub fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::db_admin::db_delete_row))
         .routes(routes!(handlers::preview::preview_start))
         .routes(routes!(handlers::preview::preview_stop))
+        .routes(routes!(handlers::debug::send_test_email))
         .routes(routes!(handlers::athlete::athlete_stats))
         .routes(routes!(
             handlers::attendance::get_session,
@@ -201,6 +206,10 @@ pub fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::notifications::unread_count))
         .routes(routes!(handlers::notifications::mark_all_read))
         .routes(routes!(handlers::notifications::update_notification))
+        .routes(routes!(
+            handlers::devices::register_device,
+            handlers::devices::unregister_device
+        ))
         .routes(routes!(
             handlers::uploads::upload_image,
             handlers::uploads::delete_image

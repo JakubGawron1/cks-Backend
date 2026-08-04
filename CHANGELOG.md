@@ -12,6 +12,37 @@ Format sekcji:
 
 Opcjonalnie po dacie: `!breaking` (breaking API).
 
+## [1.0.0.2+5] - 2026-08-04
+
+### Mail: Resend → Brevo
+
+- Provider e-mail: Brevo (`BREVO_API_KEY`, `EMAIL_FROM` jako zweryfikowany sender).
+- Usunięto `RESEND_API_KEY` / klienta Resend.
+
+## [1.0.0.2+4] - 2026-08-04
+
+### DevTools: testowy e-mail
+
+- `POST /api/admin/debug/send-test-email` (superadmin) — wysyłka testowa przez Resend / log w dev.
+
+## [1.0.0.2+3] - 2026-08-03
+
+### E-mail (Resend): weryfikacja, reset, powiadomienia
+
+- Moduł `mail` — Resend HTTPS (`RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_ENABLED`); w dev log zamiast wysyłki.
+- Pola użytkownika: `email_verified`, `pending_email`, `notification_prefs`; KV `email_tokens`.
+- Auto-weryfikacja adresów z domeną `.dev` / `.local`.
+- Endpointy: `POST /api/auth/email/request-verification`, `confirm`, `forgot-password`, `reset-password`.
+- E-mail + in-app: skład zawodów (w tym wypisanie), plany treningowe, kontakt do kadry; potwierdzenie formularza do nadawcy.
+
+## [1.0.0.2+3] - 2026-08-03
+
+### Push FCM + device tokens
+
+- `POST/DELETE /api/devices` — rejestracja tokenów FCM per użytkownik (KV `device_tokens`).
+- Przy `notify_user` wysyłka FCM (legacy HTTP) gdy ustawione `FCM_SERVER_KEY`; invalid tokeny usuwane.
+- OpenAPI: schemat `DeviceToken`, tag `devices`.
+
 ## [1.0.0.1+1] - 2026-08-03
 
 ### `end_date` dla zawodów

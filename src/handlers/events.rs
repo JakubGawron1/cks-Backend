@@ -460,37 +460,63 @@ pub async fn update_event(
         for pid in &event.assigned_athlete_ids {
             if let Some(p) = profiles.iter().find(|x| x.id == *pid) {
                 if p.user_id != "manual" {
-                    let _ = state
-                        .db
-                        .create_notification(
-                            &p.user_id,
-                            "Przeniesiono wydarzenie",
-                            &format!("{} → {}", event.title, when),
-                            "calendar",
-                            Some("/panel/kalendarz"),
-                        )
-                        .await;
+                    crate::mail::notify_user(
+                        &state,
+                        &p.user_id,
+                        "Przeniesiono wydarzenie",
+                        &format!("{} → {}", event.title, when),
+                        "calendar",
+                        Some("/panel/kalendarz"),
+                        crate::mail::EmailChannel::None,
+                    )
+                    .await;
                 }
             }
         }
     }
 
-    // newly assigned
+    // newly assigned / removed (e-mail tylko dla zawodów)
+    let is_zawody = event.event_type == "zawody";
+    let profiles = state.db.list_profiles().await.unwrap_or_default();
     for pid in &assigned {
         if !prev_assigned.contains(pid) {
-            let profiles = state.db.list_profiles().await?;
             if let Some(p) = profiles.iter().find(|x| x.id == *pid) {
                 if p.user_id != "manual" {
-                    let _ = state
-                        .db
-                        .create_notification(
+                    let email_ch = if is_zawody {
+                        crate::mail::EmailChannel::Squad
+                    } else {
+                        crate::mail::EmailChannel::None
+                    };
+                    crate::mail::notify_user(
+                        &state,
+                        &p.user_id,
+                        "Dopisano do składu",
+                        &format!("Jesteś na składzie: {}", event.title),
+                        "calendar",
+                        Some("/panel/kalendarz"),
+                        email_ch,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+    if is_zawody {
+        for pid in &prev_assigned {
+            if !assigned.contains(pid) {
+                if let Some(p) = profiles.iter().find(|x| x.id == *pid) {
+                    if p.user_id != "manual" {
+                        crate::mail::notify_user(
+                            &state,
                             &p.user_id,
-                            "Dopisano do składu",
-                            &format!("Jesteś na składzie: {}", event.title),
+                            "Wypisano ze składu",
+                            &format!("Usunięto Cię ze składu: {}", event.title),
                             "calendar",
                             Some("/panel/kalendarz"),
+                            crate::mail::EmailChannel::Squad,
                         )
                         .await;
+                    }
                 }
             }
         }
@@ -821,16 +847,16 @@ pub async fn accept_withdrawal(
     event.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_event(event.clone()).await?;
     if let Some(uid) = user_id {
-        let _ = state
-            .db
-            .create_notification(
-                &uid,
-                "Rezygnacja zaakceptowana",
-                &format!("Wypisano Cię ze składu: {}", event.title),
-                "calendar",
-                Some("/panel/kalendarz"),
-            )
-            .await;
+        crate::mail::notify_user(
+            &state,
+            &uid,
+            "Rezygnacja zaakceptowana",
+            &format!("Wypisano Cię ze składu: {}", event.title),
+            "calendar",
+            Some("/panel/kalendarz"),
+            crate::mail::EmailChannel::Squad,
+        )
+        .await;
     }
     Ok(Json(event))
 }
@@ -871,16 +897,16 @@ pub async fn reject_withdrawal(
     event.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_event(event.clone()).await?;
     if let Some(uid) = user_id {
-        let _ = state
-            .db
-            .create_notification(
-                &uid,
-                "Rezygnacja odrzucona",
-                &format!("Pozostajesz na składzie: {}", event.title),
-                "calendar",
-                Some("/panel/kalendarz"),
-            )
-            .await;
+        crate::mail::notify_user(
+            &state,
+            &uid,
+            "Rezygnacja odrzucona",
+            &format!("Pozostajesz na składzie: {}", event.title),
+            "calendar",
+            Some("/panel/kalendarz"),
+            crate::mail::EmailChannel::Squad,
+        )
+        .await;
     }
     Ok(Json(event))
 }

@@ -86,7 +86,7 @@ pub async fn submit_contact(
     };
 
     state.db.upsert_contact_message(message.clone()).await?;
-    state
+    let _ = state
         .db
         .append_log(
             LogLevel::Info,
@@ -94,18 +94,24 @@ pub async fn submit_contact(
             &format!("Nowa wiadomość kontaktowa: {}", message.subject),
             None,
         )
-        .await?;
-
-    let _ = state
-        .db
-        .notify_staff(
-            "Nowa wiadomość kontaktowa",
-            &format!("{}: {}", message.name, message.subject),
-            "contact",
-            Some("/klub/wiadomosci"),
-            None,
-        )
         .await;
+
+    crate::mail::notify_staff_email(
+        &state,
+        "Nowa wiadomość kontaktowa",
+        &format!("{}: {}", message.name, message.subject),
+        "contact",
+        Some("/klub/wiadomosci"),
+        None,
+        crate::mail::EmailChannel::Contact,
+    )
+    .await;
+
+    let (subject, html) =
+        crate::mail::templates::contact_confirmation(&message.name, &message.subject);
+    if let Err(err) = state.mailer.send(&message.email, &subject, &html).await {
+        tracing::warn!(error = %err, "contact: confirmation email failed");
+    }
 
     Ok(Json(message))
 }

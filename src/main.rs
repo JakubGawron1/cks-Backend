@@ -4,8 +4,10 @@ mod db;
 mod error;
 mod handlers;
 mod images;
+mod mail;
 mod models;
 mod openapi;
+mod push;
 mod routes;
 mod state;
 
@@ -20,6 +22,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::mail::Mailer;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -76,9 +79,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("baza gotowa");
 
+    let mailer = Mailer::from_config(&config);
+    tracing::info!(
+        email_enabled = config.email_enabled,
+        has_brevo_key = config.brevo_api_key.is_some(),
+        "mailer gotowy"
+    );
     let state = AppState {
         db,
         config: config.clone(),
+        mailer,
     };
 
     let trace = TraceLayer::new_for_http()

@@ -448,3 +448,13 @@ pub struct Notification {
 pub struct UnreadCountResponse {
     pub count: usize,
 }
+
+/// Token urządzenia do push (FCM).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceToken {
+    pub token: String,
+    pub user_id: String,
+    /// "android" | "windows" | "ios"
+    pub platform: String,
+    pub updated_at: String,
+}

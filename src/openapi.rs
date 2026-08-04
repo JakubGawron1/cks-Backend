@@ -3,7 +3,8 @@ use utoipa::{Modify, OpenApi};
 
 use crate::models::club::*;
 use crate::models::role::Role;
-use crate::models::user::{ErrorBody, OkResponse, PublicUser};
+use crate::handlers::debug::{SendTestEmailBody, SendTestEmailResponse};
+use crate::models::user::{ErrorBody, OkResponse, NotificationPrefs, PublicUser};
 use crate::images::{DeleteImageResponse, ImageProvider, UploadImageResponse};
 
 /// Schemat bezpieczeństwa Bearer JWT.
@@ -25,7 +26,7 @@ impl Modify for SecurityAddon {
 #[openapi(
     info(
         title = "CKS Slavia API",
-        version = "1.0.0.1+1",
+        version = "1.0.0.2+5",
         description = "API panelu klubowego CKS Slavia Ruda Śląska"
     ),
     modifiers(&SecurityAddon),
@@ -33,6 +34,7 @@ impl Modify for SecurityAddon {
         PublicUser,
         OkResponse,
         ErrorBody,
+        NotificationPrefs,
         Role,
         AthleteProfile,
         FeatureFlag,
@@ -65,6 +67,9 @@ impl Modify for SecurityAddon {
         ContactMessage,
         Notification,
         UnreadCountResponse,
+        DeviceToken,
+        SendTestEmailBody,
+        SendTestEmailResponse,
         ImageProvider,
         UploadImageResponse,
         DeleteImageResponse,
@@ -76,6 +81,7 @@ impl Modify for SecurityAddon {
         (name = "admin", description = "Narzędzia superadmin"),
         (name = "contact", description = "Formularz kontaktowy i skrzynka"),
         (name = "notifications", description = "Powiadomienia in-app"),
+        (name = "devices", description = "Tokeny push (FCM)"),
         (name = "uploads", description = "Upload obrazów (ImageKit)"),
         (name = "public", description = "Publiczne endpointy strony klubu"),
     )

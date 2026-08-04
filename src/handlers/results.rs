@@ -288,19 +288,19 @@ pub async fn update_result(
             .filter(|s| !s.trim().is_empty())
             .map(|s| format!(" Notatka: {s}"))
             .unwrap_or_default();
-        let _ = state
-            .db
-            .create_notification(
-                uid,
-                "Aktualizacja wyniku",
-                &format!(
-                    "Wynik z „{}” został {}.{note}",
-                    result.event_name, status_label
-                ),
-                "result",
-                Some("/panel/wyniki"),
-            )
-            .await;
+        crate::mail::notify_user(
+            &state,
+            uid,
+            "Aktualizacja wyniku",
+            &format!(
+                "Wynik z „{}” został {}.{note}",
+                result.event_name, status_label
+            ),
+            "result",
+            Some("/panel/wyniki"),
+            crate::mail::EmailChannel::None,
+        )
+        .await;
     }
 
     Ok(Json(result))

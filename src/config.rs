@@ -38,6 +38,12 @@ pub struct Config {
     pub imagekit_public_key: Option<String>,
     pub imagekit_private_key: Option<String>,
     pub imagekit_url_endpoint: Option<String>,
+    /// Wysyłka e-mail przez Brevo (gdy false — tylko log).
+    pub email_enabled: bool,
+    pub brevo_api_key: Option<String>,
+    pub email_from: Option<String>,
+    /// Legacy FCM server key — gdy brak, push jest no-op.
+    pub fcm_server_key: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -203,6 +209,36 @@ impl Config {
             .ok()
             .filter(|v| !v.is_empty());
 
+        let email_enabled = match std::env::var("EMAIL_ENABLED") {
+            Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                other => {
+                    return Err(ConfigError::Invalid(format!(
+                        "EMAIL_ENABLED musi być true/false (otrzymano: {other})"
+                    )));
+                }
+            },
+            // Dev: log only; production: enable when key present.
+            Err(_) => {
+                production_mode == ProductionMode::Production
+                    && std::env::var("BREVO_API_KEY")
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .is_some()
+            }
+        };
+        let brevo_api_key = std::env::var("BREVO_API_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
+        let email_from = std::env::var("EMAIL_FROM")
+            .ok()
+            .filter(|v| !v.is_empty());
+
+        let fcm_server_key = std::env::var("FCM_SERVER_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
+
         Ok(Self {
             production_mode,
             database_url,
@@ -218,6 +254,10 @@ impl Config {
             imagekit_public_key,
             imagekit_private_key,
             imagekit_url_endpoint,
+            email_enabled,
+            brevo_api_key,
+            email_from,
+            fcm_server_key,
         })
     }
 

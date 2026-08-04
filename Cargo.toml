@@ -1,6 +1,6 @@
 [package]
 name = "slavia-backend"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 
 [profile.release]
@@ -31,3 +31,4 @@ utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-axum = "0.2"
 utoipa-scalar = { version = "0.3", features = ["axum"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+sha2 = "0.10"
