@@ -26,7 +26,7 @@ impl Modify for SecurityAddon {
 #[openapi(
     info(
         title = "CKS Slavia API",
-        version = "1.0.0.2+11",
+        version = "1.0.0.2+12",
         description = "API panelu klubowego CKS Slavia Ruda Śląska"
     ),
     modifiers(&SecurityAddon),
