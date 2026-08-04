@@ -12,6 +12,12 @@ Format sekcji:
 
 Opcjonalnie po dacie: `!breaking` (breaking API).
 
+## [1.0.0.2+6] - 2026-08-04
+
+### Powiadomienia: usuwanie
+
+- `DELETE /api/notifications/{id}` — właściciel może usunąć swoje powiadomienie.
+
 ## [1.0.0.2+5] - 2026-08-04
 
 ### Mail: Resend → Brevo

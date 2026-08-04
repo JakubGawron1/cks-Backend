@@ -205,7 +205,10 @@ pub fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::notifications::list_notifications))
         .routes(routes!(handlers::notifications::unread_count))
         .routes(routes!(handlers::notifications::mark_all_read))
-        .routes(routes!(handlers::notifications::update_notification))
+        .routes(routes!(
+            handlers::notifications::update_notification,
+            handlers::notifications::delete_notification
+        ))
         .routes(routes!(
             handlers::devices::register_device,
             handlers::devices::unregister_device

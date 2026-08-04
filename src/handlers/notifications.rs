@@ -101,6 +101,40 @@ pub async fn update_notification(
 }
 
 #[utoipa::path(
+    delete,
+    path = "/api/notifications/{id}",
+    params(("id" = String, Path, description = "ID powiadomienia")),
+    responses(
+        (status = 200, description = "Usunięto powiadomienie", body = OkResponse),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Forbidden", body = ErrorBody),
+        (status = 404, description = "Powiadomienie nie istnieje", body = ErrorBody),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "notifications"
+)]
+pub async fn delete_notification(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<OkResponse>> {
+    let existing = state
+        .db
+        .get_notification(&id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Powiadomienie nie istnieje.".into()))?;
+
+    if existing.user_id != auth.user.id {
+        return Err(AppError::Forbidden(
+            "Nie możesz usuwać cudzych powiadomień.".into(),
+        ));
+    }
+
+    state.db.delete_notification(&id).await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+#[utoipa::path(
     post,
     path = "/api/notifications/mark-all-read",
     responses(
