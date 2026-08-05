@@ -12,6 +12,20 @@ Format sekcji:
 
 Opcjonalnie po dacie: `!breaking` (breaking API).
 
+## [1.1.0.5+1] - 2026-08-05
+
+### Fix: poprawka zaakceptowanego wyniku przez zawodnika
+
+- Zawodnik może edytować też wynik `accepted`; po zapisie status → `pending` + powiadomienie kadry.
+
+## [1.0.0.3+23] - 2026-08-05
+
+### Feature: edycja wyników (kadra + zawodnik)
+
+- `PATCH /api/results/{id}`: opcjonalne pola wyniku (nazwa, data, ciężary, masa, miejsce) + opcjonalny status.
+- Kadra: edycja `pending` / `needs_edit` / `accepted` (poprawki); po zapisie zaakceptowanego — sync kategorii w profilu.
+- Zawodnik: edycja własnych `pending` / `needs_edit` → wraca do `pending`.
+
 ## [1.0.0.3+22] - 2026-08-05
 
 ### Feature: auto kategoria przy zapisie profilu

@@ -25,8 +25,16 @@ fn parse_event_date(raw: Option<&str>) -> AppResult<String> {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateResultBody {
-    pub status: ResultStatus,
+    /// Gdy brak — status bez zmian (sama edycja pól).
+    pub status: Option<ResultStatus>,
     pub reviewer_note: Option<String>,
+    pub event_name: Option<String>,
+    /// YYYY-MM-DD
+    pub event_date: Option<String>,
+    pub snatch_kg: Option<f64>,
+    pub clean_jerk_kg: Option<f64>,
+    pub bodyweight_kg: Option<f64>,
+    pub venue: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -351,7 +359,8 @@ pub async fn create_result(
     params(("id" = String, Path, description = "ID wyniku")),
     request_body = UpdateResultBody,
     responses(
-        (status = 200, description = "Zweryfikowano wynik", body = CompetitionResult),
+        (status = 200, description = "Zaktualizowano / zweryfikowano wynik", body = CompetitionResult),
+        (status = 400, description = "Nieprawidłowe dane", body = ErrorBody),
         (status = 401, description = "Unauthorized", body = ErrorBody),
         (status = 403, description = "Forbidden", body = ErrorBody),
         (status = 404, description = "Wynik nie istnieje", body = ErrorBody),
@@ -364,19 +373,155 @@ pub async fn update_result(
     Path(id): Path<String>,
     Json(body): Json<UpdateResultBody>,
 ) -> AppResult<Json<CompetitionResult>> {
-    ensure_roles(&auth, &[Role::Trener, Role::Admin])?;
+    ensure_roles(&auth, &[Role::Zawodnik, Role::Trener, Role::Admin])?;
 
     let mut result = state
         .db
-        .get_result(&id).await?
+        .get_result(&id)
+        .await?
         .ok_or_else(|| AppError::NotFound("Wynik nie istnieje.".into()))?;
 
-    result.status = body.status;
-    result.reviewer_note = body.reviewer_note;
+    let is_staff = has_any_role(auth.roles(), &[Role::Trener, Role::Admin]);
+    let is_owner = result.user_id.as_deref() == Some(auth.effective_id());
+
+    if !is_staff {
+        if !is_owner {
+            return Err(AppError::Forbidden(
+                "Możesz edytować tylko własne wyniki.".into(),
+            ));
+        }
+        match result.status {
+            ResultStatus::Pending | ResultStatus::NeedsEdit | ResultStatus::Accepted => {}
+            ResultStatus::Rejected => {
+                return Err(AppError::Forbidden(
+                    "Odrzuconego wyniku nie da się poprawić — zgłoś nowy.".into(),
+                ));
+            }
+        }
+        if let Some(status) = body.status {
+            if status != ResultStatus::Pending && status != ResultStatus::NeedsEdit {
+                return Err(AppError::Forbidden(
+                    "Zawodnik nie może zmieniać statusu weryfikacji.".into(),
+                ));
+            }
+        }
+    } else {
+        // Kadra: edycja accepted / pending / needs_edit (poprawki błędów).
+        match result.status {
+            ResultStatus::Accepted
+            | ResultStatus::Pending
+            | ResultStatus::NeedsEdit => {}
+            ResultStatus::Rejected => {
+                if body.event_name.is_some()
+                    || body.event_date.is_some()
+                    || body.snatch_kg.is_some()
+                    || body.clean_jerk_kg.is_some()
+                    || body.bodyweight_kg.is_some()
+                    || body.venue.is_some()
+                {
+                    return Err(AppError::BadRequest(
+                        "Odrzuconego wyniku nie edytuje się — utwórz nowy albo zmień status.".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let fields_touched = body.event_name.is_some()
+        || body.event_date.is_some()
+        || body.snatch_kg.is_some()
+        || body.clean_jerk_kg.is_some()
+        || body.bodyweight_kg.is_some()
+        || body.venue.is_some();
+
+    if let Some(name) = body.event_name.as_deref() {
+        let trimmed = name.trim();
+        if result.kind.eq_ignore_ascii_case("training") {
+            result.event_name = if trimmed.is_empty() {
+                "Trening".into()
+            } else {
+                trimmed.to_string()
+            };
+        } else if trimmed.is_empty() {
+            return Err(AppError::BadRequest("Podaj nazwę zawodów.".into()));
+        } else {
+            result.event_name = trimmed.to_string();
+        }
+    }
+
+    if let Some(raw_date) = body.event_date.as_deref() {
+        result.event_date = Some(parse_event_date(Some(raw_date))?);
+    }
+
+    if let Some(s) = body.snatch_kg {
+        result.snatch_kg = Some(s);
+    }
+    if let Some(c) = body.clean_jerk_kg {
+        result.clean_jerk_kg = Some(c);
+    }
+    if body.snatch_kg.is_some() || body.clean_jerk_kg.is_some() {
+        result.total_kg = match (result.snatch_kg, result.clean_jerk_kg) {
+            (Some(s), Some(c)) => Some(s + c),
+            _ => result.total_kg,
+        };
+    }
+
+    if let Some(bw) = body.bodyweight_kg {
+        if !bw.is_finite() || bw <= 0.0 {
+            return Err(AppError::BadRequest("Podaj poprawną masę ciała (kg).".into()));
+        }
+        result.bodyweight_kg = Some(bw);
+        if result.kind.eq_ignore_ascii_case("competition") {
+            let profile = if let Some(uid) = result.user_id.as_deref() {
+                state.db.find_profile_by_user_id(uid).await?
+            } else {
+                let name = result.athlete_name.trim().to_lowercase();
+                state
+                    .db
+                    .list_profiles()
+                    .await?
+                    .into_iter()
+                    .find(|p| p.display_name.trim().to_lowercase() == name)
+            };
+            if let Some(profile) = profile {
+                result.category = Some(resolve_category_from_profile(
+                    &profile,
+                    bw,
+                    Utc::now().date_naive(),
+                )?);
+            }
+        }
+    }
+
+    if let Some(venue) = body.venue {
+        let t = venue.trim().to_string();
+        result.venue = if t.is_empty() { None } else { Some(t) };
+    }
+
+    if let Some(note) = body.reviewer_note {
+        result.reviewer_note = {
+            let t = note.trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        };
+    }
+
+    if let Some(status) = body.status {
+        result.status = status;
+    } else if !is_staff && fields_touched {
+        // Po poprawce zawodnika (także wcześniej zaakceptowanego) wraca do weryfikacji.
+        result.status = ResultStatus::Pending;
+    }
+
+    let became_pending_from_athlete = !is_staff
+        && fields_touched
+        && result.status == ResultStatus::Pending;
+
     result.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_result(result.clone()).await?;
 
-    if result.status == ResultStatus::Accepted {
+    if result.status == ResultStatus::Accepted
+        && result.kind.eq_ignore_ascii_case("competition")
+    {
         let synced = state
             .db
             .apply_accepted_competition_to_profile(&result, None)
@@ -388,7 +533,7 @@ pub async fn update_result(
                     LogLevel::Info,
                     "results",
                     &format!(
-                        "Zaktualizowano kategorię/masę w profilu po weryfikacji {} → {:?}",
+                        "Zaktualizowano kategorię/masę w profilu po edycji/weryfikacji {} → {:?}",
                         result.event_name, result.category
                     ),
                     Some(&auth.user.id),
@@ -397,39 +542,64 @@ pub async fn update_result(
         }
     }
 
-    state.db.append_log(
-        LogLevel::Info,
-        "results",
-        &format!("Weryfikacja wyniku {id} → {:?}", result.status),
-        Some(&auth.user.id),
-    ).await?;
-
-    if let Some(uid) = result.user_id.as_deref() {
-        let status_label = match result.status {
-            ResultStatus::Accepted => "zaakceptowany",
-            ResultStatus::Rejected => "odrzucony",
-            ResultStatus::NeedsEdit => "wymaga poprawy",
-            ResultStatus::Pending => "oczekuje",
-        };
-        let note = result
-            .reviewer_note
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| format!(" Notatka: {s}"))
-            .unwrap_or_default();
-        crate::mail::notify_user(
-            &state,
-            uid,
-            "Aktualizacja wyniku",
+    state
+        .db
+        .append_log(
+            LogLevel::Info,
+            "results",
             &format!(
-                "Wynik z „{}” został {}.{note}",
-                result.event_name, status_label
+                "Aktualizacja wyniku {id} → {:?}{}",
+                result.status,
+                if fields_touched { " (pola)" } else { "" }
             ),
-            "result",
-            Some("/panel/wyniki"),
-            crate::mail::EmailChannel::None,
+            Some(&auth.user.id),
         )
-        .await;
+        .await?;
+
+    if became_pending_from_athlete {
+        let _ = state
+            .db
+            .notify_staff(
+                "Wynik do ponownej weryfikacji",
+                &format!(
+                    "{} · {} ({}) — poprawiony przez zawodnika",
+                    result.athlete_name, result.event_name, result.kind
+                ),
+                "result",
+                Some("/klub/weryfikacja-wynikow"),
+                Some(&auth.user.id),
+            )
+            .await;
+    }
+
+    if is_staff {
+        if let Some(uid) = result.user_id.as_deref() {
+            let status_label = match result.status {
+                ResultStatus::Accepted => "zaakceptowany",
+                ResultStatus::Rejected => "odrzucony",
+                ResultStatus::NeedsEdit => "wymaga poprawy",
+                ResultStatus::Pending => "oczekuje",
+            };
+            let note = result
+                .reviewer_note
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| format!(" Notatka: {s}"))
+                .unwrap_or_default();
+            crate::mail::notify_user(
+                &state,
+                uid,
+                "Aktualizacja wyniku",
+                &format!(
+                    "Wynik z „{}” został {}.{note}",
+                    result.event_name, status_label
+                ),
+                "result",
+                Some("/panel/wyniki"),
+                crate::mail::EmailChannel::None,
+            )
+            .await;
+        }
     }
 
     Ok(Json(result))
