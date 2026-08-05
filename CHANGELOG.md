@@ -12,6 +12,12 @@ Format sekcji:
 
 Opcjonalnie po dacie: `!breaking` (breaking API).
 
+## [1.0.0.3+22] - 2026-08-05
+
+### Feature: auto kategoria przy zapisie profilu
+
+- `POST/PATCH /api/profiles`: gdy są masa, data urodzenia i płeć — `category` wyliczana z tabel 2026 (nadpisuje ręczną wartość).
+
 ## [1.0.0.3+21] - 2026-08-05
 
 ### Feature: kategoria z zawodów → profil

@@ -9,12 +9,29 @@ use crate::models::club::{AthleteProfile, LogLevel};
 use crate::models::role::Role;
 use crate::models::user::{ErrorBody, OkResponse};
 use crate::state::AppState;
+use crate::weightlifting_categories::resolve_category;
+use chrono::Utc;
 
 fn normalize_photo_url(raw: Option<String>) -> Option<String> {
     raw.and_then(|s| {
         let t = s.trim().to_string();
         if t.is_empty() { None } else { Some(t) }
     })
+}
+
+/// Kategoria z masy + wieku/płci; gdy brak danych — zostaw ręczną z body (lub None).
+fn resolve_profile_category(
+    bodyweight_kg: Option<f64>,
+    birth_date: &Option<String>,
+    sex: &Option<String>,
+    fallback: Option<String>,
+) -> Option<String> {
+    let bw = bodyweight_kg.filter(|v| v.is_finite() && *v > 0.0)?;
+    let birth = birth_date.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    let sex_raw = sex.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    resolve_category(birth, sex_raw, bw, Utc::now().date_naive())
+        .ok()
+        .or(fallback)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -128,16 +145,25 @@ pub async fn create_profile(
     }
 
     let now = chrono::Utc::now().to_rfc3339();
+    let sex = body.sex.map(|s| s.trim().to_ascii_lowercase());
+    let birth_date = body.birth_date;
+    let bodyweight_kg = body.bodyweight_kg;
+    let category = resolve_profile_category(
+        bodyweight_kg,
+        &birth_date,
+        &sex,
+        body.category,
+    );
     let profile = AthleteProfile {
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.clone(),
         display_name: body.display_name.trim().to_string(),
-        bodyweight_kg: body.bodyweight_kg,
-        category: body.category,
+        bodyweight_kg,
+        category,
         notes: body.notes,
         photo_url: photo_url.clone(),
-        birth_date: body.birth_date,
-        sex: body.sex.map(|s| s.trim().to_ascii_lowercase()),
+        birth_date,
+        sex,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -194,17 +220,26 @@ pub async fn update_profile(
     }
 
     let photo_url = normalize_photo_url(body.photo_url);
+    let sex = body.sex.map(|s| s.trim().to_ascii_lowercase());
+    let birth_date = body.birth_date;
+    let bodyweight_kg = body.bodyweight_kg;
+    let category = resolve_profile_category(
+        bodyweight_kg,
+        &birth_date,
+        &sex,
+        body.category,
+    );
 
     let profile = AthleteProfile {
         id: existing.id,
         user_id: user_id.clone(),
         display_name: body.display_name.trim().to_string(),
-        bodyweight_kg: body.bodyweight_kg,
-        category: body.category,
+        bodyweight_kg,
+        category,
         notes: body.notes,
         photo_url: photo_url.clone(),
-        birth_date: body.birth_date,
-        sex: body.sex.map(|s| s.trim().to_ascii_lowercase()),
+        birth_date,
+        sex,
         created_at: existing.created_at,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
