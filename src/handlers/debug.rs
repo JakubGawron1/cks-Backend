@@ -46,6 +46,12 @@ pub async fn send_test_email(
 ) -> AppResult<Json<SendTestEmailResponse>> {
     ensure_roles(&auth, &[Role::Superadmin])?;
 
+    if !state.db.is_flag_enabled("email_test").await {
+        return Err(AppError::BadRequest(
+            "Wysyłka testowych e-maili jest wyłączona (flaga email_test).".into(),
+        ));
+    }
+
     let to = body.email.trim().to_ascii_lowercase();
     if !to.contains('@') || to.len() < 5 || to.len() > 200 {
         return Err(AppError::BadRequest("Podaj poprawny adres e-mail.".into()));

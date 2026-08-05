@@ -31,7 +31,7 @@ pub async fn list_notifications(
     Ok(Json(
         state
             .db
-            .list_notifications_for_user(&auth.user.id)
+            .list_notifications_for_user(auth.effective_id())
             .await?,
     ))
 }
@@ -52,7 +52,7 @@ pub async fn unread_count(
 ) -> AppResult<Json<UnreadCountResponse>> {
     let count = state
         .db
-        .unread_notification_count(&auth.user.id)
+        .unread_notification_count(auth.effective_id())
         .await?;
     Ok(Json(UnreadCountResponse { count }))
 }

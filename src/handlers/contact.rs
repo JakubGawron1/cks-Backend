@@ -109,8 +109,10 @@ pub async fn submit_contact(
 
     let (subject, html) =
         crate::mail::templates::contact_confirmation(&message.name, &message.subject);
-    if let Err(err) = state.mailer.send(&message.email, &subject, &html).await {
-        tracing::warn!(error = %err, "contact: confirmation email failed");
+    if state.db.is_flag_enabled("email_contact_confirmation").await {
+        if let Err(err) = state.mailer.send(&message.email, &subject, &html).await {
+            tracing::warn!(error = %err, "contact: confirmation email failed");
+        }
     }
 
     Ok(Json(message))

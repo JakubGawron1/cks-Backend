@@ -325,6 +325,12 @@ pub async fn request_email_verification(
         raw
     );
     let (subject, html) = templates::verify_email(&user.display_name, &verify_url);
+    if !state.db.is_flag_enabled("email_verification").await {
+        return Err(AppError::BadRequest(
+            "Wysyłka e-maili weryfikacyjnych jest wyłączona (flaga email_verification)."
+                .into(),
+        ));
+    }
     state.mailer.send(&target, &subject, &html).await?;
 
     Ok(Json(PublicUser::from(&user)))
@@ -417,8 +423,9 @@ pub async fn forgot_password(
     }
 
     // Zawsze 200 — bez enumeracji kont.
+    let reset_enabled = state.db.is_flag_enabled("email_password_reset").await;
     if let Some(user) = state.db.find_user_by_email(&email).await? {
-        if user.is_active {
+        if user.is_active && reset_enabled {
             let raw = new_token();
             let token_hash = hash_token(&raw);
             state
@@ -449,6 +456,8 @@ pub async fn forgot_password(
             if let Err(err) = state.mailer.send(&user.email, &subject, &html).await {
                 tracing::warn!(error = %err, "forgot_password: send failed");
             }
+        } else if user.is_active && !reset_enabled {
+            tracing::info!("forgot_password: flaga email_password_reset wyłączona — pominięto wysyłkę");
         }
     }
 

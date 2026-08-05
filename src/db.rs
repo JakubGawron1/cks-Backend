@@ -346,6 +346,7 @@ impl Database {
                 athlete_name: "Jan Kowalski".into(),
                 user_id: None,
                 event_name: "Puchar Śląska 2026".into(),
+                event_date: Some("2026-03-15".into()),
                 kind: "competition".into(),
                 snatch_kg: Some(110.0),
                 clean_jerk_kg: Some(140.0),
@@ -574,6 +575,62 @@ impl Database {
             .find(|p| p.user_id == user_id))
     }
 
+    /// Po akceptacji wyniku z zawodów: kategoria + masa z ważenia stają się oficjalne w profilu
+    /// (statystyki / panel czytają `AthleteProfile.category`).
+    pub async fn apply_accepted_competition_to_profile(
+        &self,
+        result: &CompetitionResult,
+        profile_id: Option<&str>,
+    ) -> AppResult<bool> {
+        if !result.kind.eq_ignore_ascii_case("competition") {
+            return Ok(false);
+        }
+        if result.status != ResultStatus::Accepted {
+            return Ok(false);
+        }
+        let Some(category) = result
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(false);
+        };
+
+        let profile = if let Some(pid) = profile_id.map(str::trim).filter(|s| !s.is_empty()) {
+            self.get_profile(pid).await?
+        } else if let Some(uid) = result.user_id.as_deref() {
+            self.find_profile_by_user_id(uid).await?
+        } else {
+            let name = result.athlete_name.trim().to_lowercase();
+            self.list_profiles().await?.into_iter().find(|p| {
+                p.display_name.trim().to_lowercase() == name
+            })
+        };
+
+        let Some(mut profile) = profile else {
+            return Ok(false);
+        };
+
+        let mut changed = false;
+        if profile.category.as_deref() != Some(category) {
+            profile.category = Some(category.to_string());
+            changed = true;
+        }
+        if let Some(bw) = result.bodyweight_kg.filter(|v| v.is_finite() && *v > 0.0) {
+            if profile.bodyweight_kg != Some(bw) {
+                profile.bodyweight_kg = Some(bw);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+        profile.updated_at = chrono::Utc::now().to_rfc3339();
+        self.upsert_profile(profile).await?;
+        Ok(true)
+    }
+
     /// Zawodnik: zdjęcie konta = zdjęcie profilu — synchronizacja w obie strony.
     pub async fn sync_photo_user_to_profile(
         &self,
@@ -686,6 +743,46 @@ impl Database {
                 FlagRolloutStatus::Wired,
                 false,
             ),
+            (
+                "experimental_notification_emails",
+                "E-maile powiadomień (eksperymentalne)",
+                FlagKind::Experimental,
+                "Dodatkowe maile o składzie zawodów, planach treningowych i formularzu kontaktowym (3 kategorie w ustawieniach). In-app (dzwonek) działa zawsze. Domyślnie wyłączone.",
+                FlagRolloutStatus::Wired,
+                false,
+            ),
+            (
+                "email_password_reset",
+                "E-mail: reset hasła",
+                FlagKind::Stable,
+                "Wysyłka linku do ustawienia nowego hasła (zapomniane hasło). Domyślnie włączone.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "email_verification",
+                "E-mail: weryfikacja adresu",
+                FlagKind::Stable,
+                "Wysyłka linku weryfikacyjnego przy potwierdzeniu / zmianie e-maila konta. Domyślnie włączone.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "email_contact_confirmation",
+                "E-mail: potwierdzenie kontaktu",
+                FlagKind::Stable,
+                "Potwierdzenie do nadawcy po wysłaniu formularza kontaktowego. Domyślnie włączone.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
+            (
+                "email_test",
+                "E-mail: test DevTools",
+                FlagKind::Stable,
+                "Wysyłka testowego e-maila z zakładki Debug w DevTools (superadmin). Domyślnie włączone.",
+                FlagRolloutStatus::Wired,
+                true,
+            ),
         ]
     }
 
@@ -721,6 +818,21 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    /// Czy flaga jest włączona. Brak wpisu w DB → `false` (bezpieczny default).
+    pub async fn is_flag_enabled(&self, key: &str) -> bool {
+        match self.list_flags().await {
+            Ok(flags) => flags
+                .iter()
+                .find(|f| f.key == key)
+                .map(|f| f.enabled)
+                .unwrap_or(false),
+            Err(err) => {
+                tracing::warn!(error = %err, key, "is_flag_enabled: list_flags failed");
+                false
+            }
+        }
     }
 
     pub async fn list_flags(&self) -> AppResult<Vec<FeatureFlag>> {

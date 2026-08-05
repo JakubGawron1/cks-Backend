@@ -130,12 +130,13 @@ pub async fn list_attendance(
             .await;
     }
 
-    let is_staff =
-        crate::models::role::has_any_role(auth.roles(), &[Role::Trener, Role::Admin]);
+    let is_staff = !auth.is_previewing()
+        && crate::models::role::has_any_role(auth.roles(), &[Role::Trener, Role::Admin]);
     let mut items = state.db.list_attendance_in_window().await?;
 
     if !is_staff {
-        items.retain(|r| r.user_id == auth.user.id);
+        let uid = auth.effective_id();
+        items.retain(|r| r.user_id == uid);
         // Zawodnik nie widzi pending_unauthorized / rejected
         items.retain(|r| r.status == "present" || r.status == "absent");
     } else if let Some(uid) = query.user_id {

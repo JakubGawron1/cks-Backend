@@ -81,6 +81,9 @@ pub struct CompetitionResult {
     pub athlete_name: String,
     pub user_id: Option<String>,
     pub event_name: String,
+    /// Data zawodów / treningu (YYYY-MM-DD)
+    #[serde(default)]
+    pub event_date: Option<String>,
     /// "competition" | "training"
     #[serde(default = "default_result_kind")]
     pub kind: String,

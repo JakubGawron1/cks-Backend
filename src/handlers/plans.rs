@@ -45,10 +45,11 @@ pub async fn list_plans(
     auth: AuthUser,
 ) -> AppResult<Json<Vec<TrainingPlan>>> {
     ensure_roles(&auth, &[Role::Zawodnik, Role::Trener])?;
-    if is_plan_editor(&auth) {
+    // W podglądzie — perspektywa targetu (nie pełna lista trenera/SA).
+    if !auth.is_previewing() && is_plan_editor(&auth) {
         return Ok(Json(state.db.list_plans().await?));
     }
-    Ok(Json(state.db.plans_for_user(&auth.user.id).await?))
+    Ok(Json(state.db.plans_for_user(auth.effective_id()).await?))
 }
 
 #[utoipa::path(
@@ -219,13 +220,14 @@ pub async fn get_my_progress(
     Path(plan_id): Path<String>,
 ) -> AppResult<Json<TrainingPlanProgress>> {
     ensure_roles(&auth, &[Role::Zawodnik, Role::Trener])?;
-    if let Some(p) = state.db.get_plan_progress(&plan_id, &auth.user.id).await? {
+    let uid = auth.effective_id();
+    if let Some(p) = state.db.get_plan_progress(&plan_id, uid).await? {
         return Ok(Json(p));
     }
     Ok(Json(TrainingPlanProgress {
-        id: format!("{}:{}", plan_id, auth.user.id),
+        id: format!("{}:{}", plan_id, uid),
         plan_id,
-        user_id: auth.user.id.clone(),
+        user_id: uid.to_string(),
         entries: vec![],
         updated_at: chrono::Utc::now().to_rfc3339(),
     }))

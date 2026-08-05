@@ -296,9 +296,10 @@ pub async fn list_my_events(
         .await;
 
     let profiles = state.db.list_profiles().await?;
+    let uid = auth.effective_id();
     let my_ids: Vec<String> = profiles
         .iter()
-        .filter(|p| p.user_id == auth.user.id)
+        .filter(|p| p.user_id == uid)
         .map(|p| p.id.clone())
         .collect();
     let attendance = state.db.list_attendance_raw().await?;
@@ -321,7 +322,7 @@ pub async fn list_my_events(
             to_athlete_view(
                 &state,
                 &e,
-                &auth.user.id,
+                uid,
                 &my_ids,
                 &profiles,
                 &attendance,

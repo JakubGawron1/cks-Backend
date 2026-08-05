@@ -50,6 +50,7 @@ pub async fn list_public_flags(State(state): State<AppState>) -> AppResult<Json<
         "athlete_calendar",
         "ui_toasts",
         "experimental_panel_themes",
+        "experimental_notification_emails",
     ];
 
     let flags = state.db.list_flags().await?;

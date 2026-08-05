@@ -10,6 +10,7 @@ mod openapi;
 mod push;
 mod routes;
 mod state;
+mod weightlifting_categories;
 
 use std::net::SocketAddr;
 use std::time::Duration;

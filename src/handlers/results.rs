@@ -9,6 +9,19 @@ use crate::models::club::{CompetitionResult, LogLevel, ResultStatus};
 use crate::models::role::{has_any_role, Role};
 use crate::models::user::ErrorBody;
 use crate::state::AppState;
+use crate::weightlifting_categories::resolve_category_from_profile;
+use chrono::{NaiveDate, Utc};
+
+fn parse_event_date(raw: Option<&str>) -> AppResult<String> {
+    let trimmed = raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Podaj datę zawodów / treningu.".into()))?;
+    let date = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d").map_err(|_| {
+        AppError::BadRequest("Data musi być w formacie RRRR-MM-DD.".into())
+    })?;
+    Ok(date.format("%Y-%m-%d").to_string())
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateResultBody {
@@ -19,16 +32,21 @@ pub struct UpdateResultBody {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateResultBody {
     pub event_name: String,
+    /// Data zawodów / treningu (YYYY-MM-DD)
+    pub event_date: Option<String>,
     pub kind: Option<String>,
     pub snatch_kg: Option<f64>,
     pub clean_jerk_kg: Option<f64>,
     pub total_kg: Option<f64>,
     pub bodyweight_kg: Option<f64>,
     pub venue: Option<String>,
+    /// Ignorowane dla zawodów — kategoria wyliczana z profilu (wiek + płeć) i masy ciała.
     pub category: Option<String>,
     pub athlete_name: Option<String>,
     /// Powiązanie z kontem zawodnika (staff może wpisywać za kogoś)
     pub user_id: Option<String>,
+    /// Profil zawodnika (staff) — do wyliczenia kategorii gdy brak user_id
+    pub profile_id: Option<String>,
     /// Trener/admin: wynik od razu Accepted (bez kolejki weryfikacji)
     pub auto_accept: Option<bool>,
 }
@@ -58,9 +76,10 @@ pub async fn list_results(
     if mine {
         ensure_roles(&auth, &[Role::Zawodnik, Role::Trener, Role::Admin])?;
         let all = state.db.list_results().await?;
+        let uid = auth.effective_id();
         let filtered = all
             .into_iter()
-            .filter(|r| r.user_id.as_deref() == Some(auth.user.id.as_str()))
+            .filter(|r| r.user_id.as_deref() == Some(uid))
             .collect();
         return Ok(Json(filtered));
     }
@@ -109,10 +128,6 @@ pub async fn create_result(
 ) -> AppResult<Json<CompetitionResult>> {
     ensure_roles(&auth, &[Role::Zawodnik, Role::Trener, Role::Admin])?;
 
-    if body.event_name.trim().is_empty() {
-        return Err(AppError::BadRequest("Podaj nazwę zawodów / treningu.".into()));
-    }
-
     let kind = body
         .kind
         .unwrap_or_else(|| "competition".into())
@@ -122,6 +137,23 @@ pub async fn create_result(
             "kind musi być 'competition' lub 'training'.".into(),
         ));
     }
+
+    let event_name = {
+        let trimmed = body.event_name.trim();
+        if kind == "training" {
+            if trimmed.is_empty() {
+                "Trening".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        } else if trimmed.is_empty() {
+            return Err(AppError::BadRequest("Podaj nazwę zawodów.".into()));
+        } else {
+            trimmed.to_string()
+        }
+    };
+
+    let event_date = parse_event_date(body.event_date.as_deref())?;
 
     let is_staff = has_any_role(auth.roles(), &[Role::Trener, Role::Admin]);
     let auto_accept = body.auto_accept.unwrap_or(false);
@@ -171,6 +203,55 @@ pub async fn create_result(
         _ => None,
     });
 
+    let bodyweight_kg = body.bodyweight_kg;
+    let mut linked_profile_id: Option<String> = None;
+    let category = if kind == "competition" {
+        let bw = bodyweight_kg.filter(|v| v.is_finite() && *v > 0.0).ok_or_else(|| {
+            AppError::BadRequest("Podaj masę ciała na zawodach (kg).".into())
+        })?;
+
+        let profile = if let Some(pid) = body
+            .profile_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(
+                state
+                    .db
+                    .get_profile(pid)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::BadRequest("Wybrany profil zawodnika nie istnieje.".into())
+                    })?,
+            )
+        } else if let Some(uid) = user_id.as_deref() {
+            state.db.find_profile_by_user_id(uid).await?
+        } else {
+            None
+        };
+
+        let profile = profile.ok_or_else(|| {
+            AppError::BadRequest(
+                "Brak profilu zawodnika — uzupełnij datę urodzenia i płeć w profilu.".into(),
+            )
+        })?;
+        linked_profile_id = Some(profile.id.clone());
+
+        Some(resolve_category_from_profile(
+            &profile,
+            bw,
+            Utc::now().date_naive(),
+        )?)
+    } else {
+        body
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+
     let now = chrono::Utc::now().to_rfc3339();
     let status = if auto_accept {
         ResultStatus::Accepted
@@ -182,14 +263,15 @@ pub async fn create_result(
         id: uuid::Uuid::new_v4().to_string(),
         athlete_name,
         user_id,
-        event_name: body.event_name.trim().to_string(),
+        event_name,
+        event_date: Some(event_date),
         kind,
         snatch_kg: body.snatch_kg,
         clean_jerk_kg: body.clean_jerk_kg,
         total_kg: total,
-        bodyweight_kg: body.bodyweight_kg,
+        bodyweight_kg,
         venue: body.venue,
-        category: body.category,
+        category,
         status,
         reviewer_note: if auto_accept {
             Some("Wpisane przez kadrę".into())
@@ -200,6 +282,31 @@ pub async fn create_result(
         updated_at: now,
     };
     state.db.upsert_result(result.clone()).await?;
+
+    if result.status == ResultStatus::Accepted {
+        let synced = state
+            .db
+            .apply_accepted_competition_to_profile(
+                &result,
+                linked_profile_id.as_deref(),
+            )
+            .await?;
+        if synced {
+            state
+                .db
+                .append_log(
+                    LogLevel::Info,
+                    "results",
+                    &format!(
+                        "Zaktualizowano kategorię/masę w profilu po wyniku {} → {:?}",
+                        result.event_name, result.category
+                    ),
+                    Some(&auth.user.id),
+                )
+                .await?;
+        }
+    }
+
     state.db.append_log(
         LogLevel::Info,
         "results",
@@ -268,6 +375,28 @@ pub async fn update_result(
     result.reviewer_note = body.reviewer_note;
     result.updated_at = chrono::Utc::now().to_rfc3339();
     state.db.upsert_result(result.clone()).await?;
+
+    if result.status == ResultStatus::Accepted {
+        let synced = state
+            .db
+            .apply_accepted_competition_to_profile(&result, None)
+            .await?;
+        if synced {
+            state
+                .db
+                .append_log(
+                    LogLevel::Info,
+                    "results",
+                    &format!(
+                        "Zaktualizowano kategorię/masę w profilu po weryfikacji {} → {:?}",
+                        result.event_name, result.category
+                    ),
+                    Some(&auth.user.id),
+                )
+                .await?;
+        }
+    }
+
     state.db.append_log(
         LogLevel::Info,
         "results",

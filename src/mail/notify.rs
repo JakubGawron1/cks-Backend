@@ -49,6 +49,14 @@ pub async fn notify_user(
         return;
     }
 
+    if !state
+        .db
+        .is_flag_enabled("experimental_notification_emails")
+        .await
+    {
+        return;
+    }
+
     let Ok(Some(user)) = state.db.find_user_by_id(user_id).await else {
         return;
     };

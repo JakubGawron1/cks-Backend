@@ -40,6 +40,17 @@ pub async fn preview_start(
         .await?
         .ok_or_else(|| AppError::NotFound("Użytkownik nie istnieje.".into()))?;
 
+    if !target.is_active {
+        return Err(AppError::Forbidden(
+            "Konto podglądane jest nieaktywne.".into(),
+        ));
+    }
+    if target.id == auth.user.id {
+        return Err(AppError::BadRequest(
+            "Nie można podglądać własnego konta.".into(),
+        ));
+    }
+
     state.db.append_log(
         LogLevel::Info,
         "preview",

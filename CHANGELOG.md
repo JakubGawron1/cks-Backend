@@ -12,6 +12,57 @@ Format sekcji:
 
 Opcjonalnie po dacie: `!breaking` (breaking API).
 
+## [1.0.0.3+21] - 2026-08-05
+
+### Feature: kategoria z zawodów → profil
+
+- Po akceptacji wyniku z zawodów (weryfikacja albo wpis kadry) `category` + `bodyweight_kg` trafiają do `AthleteProfile`.
+- Statystyki panelu i listy kont biorą kategorię z profilu — wahania wagi przy krawędzi kategorii rozwiązane ważeniem na zawodach.
+
+## [1.0.0.3+20] - 2026-08-05
+
+### Feature: `event_date` w wynikach
+
+- `CompetitionResult.event_date` (YYYY-MM-DD) + wymagane w `POST /api/results` (zawody i trening).
+- Kategoria wagowa nadal z podanej masy ciała + tabel JSON i wieku/płci z profilu — data wydarzenia jej nie zmienia.
+
+## [1.0.0.3+19] - 2026-08-05
+
+### Feature: auto kategoria wagowa (2026)
+
+- `POST /api/results` (zawody): kategoria z profilu (`birth_date`, `sex`) + `bodyweight_kg` wg tabel U15–Senior.
+- Opcjonalne `profile_id` (staff); masa ciała wymagana; ręczne `category` ignorowane dla zawodów.
+- Moduł `weightlifting_categories` + testy jednostkowe.
+
+## [1.0.0.3+18] - 2026-08-05
+
+### Flagi e-mail
+
+- Katalog: `experimental_notification_emails` (OFF) — gate w `notify_user` dla kanałów Squad/TrainingPlan/Contact.
+- Stable ON: `email_password_reset`, `email_verification`, `email_contact_confirmation`, `email_test` + `Database::is_flag_enabled`.
+- Public flags: ekspozycja `experimental_notification_emails`.
+
+## [1.0.0.3+16] - 2026-08-05
+
+### Wyniki: trening bez wymaganej nazwy
+
+- `POST /api/results` przy `kind=training`: puste `event_name` → domyślnie „Trening”; nazwa wymagana tylko dla zawodów.
+
+## [1.0.0.3+15] - 2026-08-05
+
+### Fix: CORS dla X-View-As-User
+
+- `CorsLayer.allow_headers` obejmuje `x-view-as-user` — bez tego przeglądarka nie wysyłała nagłówka podglądu.
+
+## [1.0.0.3+14] - 2026-08-04
+
+### Podgląd kont — View-As (read-only)
+
+- `AuthUser.view_as` + nagłówek `X-View-As-User` (tylko superadmin).
+- `GET /api/auth/me` i scoped reads (`plans`, `notifications`, `athlete/stats`, `results?mine`, `my-events`, attendance) używają `effective_id`.
+- Mutacje przy aktywnym View-As → 403 (wyjątek: `preview/start|stop`).
+- `preview/start` odrzuca nieaktywne / własne konto.
+
 ## [1.0.0.2+6] - 2026-08-04
 
 ### Powiadomienia: usuwanie
